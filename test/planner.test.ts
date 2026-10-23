@@ -25,7 +25,7 @@ describe('planRunsForComment', () => {
     );
     expect(plan.map((p) => [p.automationId, p.status, p.context.outcome])).toEqual([
       ['b', 'running', undefined],
-      ['c', 'skipped', 'contact_busy'],
+      ['c', 'skipped', 'another_automation_matched'],
     ]);
     expect(plan[0]!.context).toEqual({
       vars: { username: 'ana', comment_text: 'pricing?' },
@@ -34,8 +34,11 @@ describe('planRunsForComment', () => {
   });
 
   it('skips every match when the contact is busy', () => {
-    const plan = planRunsForComment([candidate('a', 'pricing')], comment, true);
-    expect(plan.map((p) => p.status)).toEqual(['skipped']);
+    const plan = planRunsForComment([candidate('a', 'pricing'), candidate('b', 'pricing')], comment, true);
+    expect(plan.map((p) => [p.status, p.context.outcome])).toEqual([
+      ['skipped', 'contact_busy'],
+      ['skipped', 'contact_busy'],
+    ]);
   });
 
   it('plans nothing when no trigger matches', () => {

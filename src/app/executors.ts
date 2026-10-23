@@ -1,4 +1,4 @@
-import { acceptReply, afterGiveUp, afterReprompt, decideOnReply } from '../core/conversation.js';
+import { acceptReply, afterGiveUp, afterReprompt, decideOnReplies } from '../core/conversation.js';
 import type { RunContext } from '../core/run.js';
 import { renderTemplate } from '../core/template.js';
 import type { Step, StepType } from '../core/types.js';
@@ -16,14 +16,17 @@ async function sendDirectMessage(ctx: StepContext, effectKey: string, text: stri
     privateReplyUsed: run.context.private_reply_used ?? false,
     lastInboundDmAt: await ctx.lastInboundDmAt(),
   });
-  await ctx.send(effectKey, () => {
+  await ctx.send(effectKey, (signal) => {
     if (!permission.ok) throw new PermanentStepError(permission.reason);
-    return ctx.client.sendDm({
-      accountId: run.contact.accountId,
-      contactId: run.contact.contactId,
-      text,
-      replyToCommentId: permission.mode === 'private_reply' ? run.context.comment.id : undefined,
-    });
+    return ctx.client.sendDm(
+      {
+        accountId: run.contact.accountId,
+        contactId: run.contact.contactId,
+        text,
+        replyToCommentId: permission.mode === 'private_reply' ? run.context.comment.id : undefined,
+      },
+      signal,
+    );
   });
   const usedPrivateReply = permission.ok && permission.mode === 'private_reply';
   return usedPrivateReply ? { ...run.context, private_reply_used: true } : run.context;
@@ -34,8 +37,8 @@ const executors: { [T in StepType]: StepExecutor<Extract<Step, { type: T }>> } =
   async reply_to_comment(ctx, step) {
     const { run } = ctx;
     const text = renderTemplate(step.text, run.context.vars);
-    await ctx.send('main', () =>
-      ctx.client.replyToComment({ accountId: run.contact.accountId, commentId: run.context.comment.id, text }),
+    await ctx.send('main', (signal) =>
+      ctx.client.replyToComment({ accountId: run.contact.accountId, commentId: run.context.comment.id, text }, signal),
     );
     return { type: 'advance' };
   },
@@ -53,18 +56,21 @@ const executors: { [T in StepType]: StepExecutor<Extract<Step, { type: T }>> } =
     const wait = context.wait ?? { since, reprompts: 0 };
     if (!wait.reply) return { type: 'wait', step, wait };
 
-    const decision = decideOnReply(step, wait, wait.reply.text);
+    // DMs sent right after the one that resumed the run are part of the same answer.
+    const later = await ctx.unconsumedDmsSince(new Date(wait.since));
+    const consumed = later.map((dm) => dm.eventId);
+    const decision = decideOnReplies(step, wait, [wait.reply.text, ...later.map((dm) => dm.text)]);
     switch (decision.kind) {
       case 'accept':
-        return { type: 'advance', context: acceptReply(context, step, decision.value) };
+        return { type: 'advance', context: acceptReply(context, step, decision.value), consumed };
       case 'reprompt': {
         const text = renderTemplate(step.reprompt_text, context.vars);
         const sent = await sendDirectMessage(ctx, `reprompt:${decision.number}`, text);
-        return { type: 'stay', context: afterReprompt(sent, wait, decision.number) };
+        return { type: 'stay', context: afterReprompt(sent, wait, decision.number), consumed };
       }
       case 'give_up': {
         const sent = await sendDirectMessage(ctx, 'give_up', renderTemplate(step.give_up_text, context.vars));
-        return { type: 'complete', context: afterGiveUp(sent) };
+        return { type: 'complete', context: afterGiveUp(sent), consumed };
       }
     }
   },

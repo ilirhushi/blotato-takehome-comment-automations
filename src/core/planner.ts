@@ -19,7 +19,7 @@ export interface PlannedRun {
 /**
  * Decides which runs a comment creates. A contact has at most one active run,
  * so only the first match starts, and only if the contact is not already busy.
- * The rest are recorded as skipped.
+ * The rest are recorded as skipped, with the reason.
  */
 export function planRunsForComment(
   candidates: CandidateAutomation[],
@@ -34,7 +34,7 @@ export function planRunsForComment(
       automationId: m.automationId,
       versionId: m.versionId,
       status: starts ? 'running' : 'skipped',
-      context: starts ? context : { ...context, outcome: 'contact_busy' },
+      context: starts ? context : { ...context, outcome: contactBusy ? 'contact_busy' : 'another_automation_matched' },
     };
   });
 }

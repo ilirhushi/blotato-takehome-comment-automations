@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { publishVersion } from '../src/app/automations.js';
 import { TransientPlatformError } from '../src/platform/types.js';
+import { Worker } from '../src/app/worker.js';
+import type { Db } from '../src/db/pool.js';
 import { setEnabled } from '../src/store/automations.js';
 import { createTestDb, type TestDb } from './helpers.js';
 import { createHarness, type Harness } from './harness.js';
@@ -134,13 +136,24 @@ describe('wait_for_reply', () => {
     expect((await h.runs())[0].status).toBe('waiting');
   });
 
-  it('handles an invalid and a valid reply sent back to back', async () => {
+  it('accepts a valid email that arrives in a burst with chatty messages, without re-prompting', async () => {
     await startConversation();
-    await h.dm('ana', 'one sec');
-    await h.dm('ana', 'ana@example.com');
+    for (const text of ['hi!', 'one sec', 'let me check', 'ana@example.com']) await h.dm('ana', text);
     await h.drain();
-    expect(h.dmTexts().slice(1)).toEqual([REPROMPT, LINK]);
+    expect(h.dmTexts().slice(1)).toEqual([LINK]);
     expect((await h.runs())[0].status).toBe('completed');
+    const { rows } = await h.db.query(`SELECT count(*)::int AS n FROM inbound_events WHERE kind = 'dm' AND consumed_by_run_id IS NULL`);
+    expect(rows[0].n).toBe(0);
+  });
+
+  it('counts a burst of invalid messages as one invalid answer', async () => {
+    await startConversation();
+    for (const text of ['hi!', 'one sec', 'let me check']) await h.dm('ana', text);
+    await h.drain();
+    expect(h.dmTexts().slice(1)).toEqual([REPROMPT]);
+    const [run] = await h.runs();
+    expect(run.status).toBe('waiting');
+    expect(run.context.wait.reprompts).toBe(1);
   });
 
   it('resumes once when two dispatchers handle concurrent DMs from the same contact', async () => {
@@ -157,7 +170,7 @@ describe('wait_for_reply', () => {
     );
     expect(rows).toEqual([
       { text: 'ana@example.com', consumed: true, processed: true },
-      { text: 'ana+second@example.com', consumed: false, processed: true },
+      { text: 'ana+second@example.com', consumed: true, processed: true },
     ]);
   });
 
@@ -249,5 +262,67 @@ describe('wait_for_reply', () => {
     await h.dm('ana', 'ana@example.com');
     await h.drain();
     expect((await h.runs()).map((r) => [r.contact_id, r.status])).toEqual([['ana', 'completed']]);
+  });
+});
+
+describe('races at the wait step', () => {
+  it('never expires a run whose on-time reply is dispatched while the scheduler runs', async () => {
+    await h.createAutomation(pricing, steps());
+    const contacts = Array.from({ length: 10 }, (_, i) => `c${i}`);
+    for (const c of contacts) await h.comment(c, 'pricing');
+    await h.drain();
+    h.clock.advance(MINUTE);
+    for (const c of contacts) await h.dm(c, `${c}@example.com`);
+    h.clock.advance(59 * MINUTE);
+
+    await Promise.all([h.newDispatcher().tick(), h.scheduler.tick(), h.newDispatcher().tick(), h.scheduler.tick()]);
+    await h.drain();
+    expect(await h.scheduler.tick()).toBe(0);
+    expect((await h.runs()).map((r) => r.status)).toEqual(contacts.map(() => 'completed'));
+  });
+
+  it('never loses a reply that arrives while the worker is entering the wait', async () => {
+    await h.createAutomation(pricing, steps());
+    await h.comment('ana', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+    await h.worker.tick(); // prompt DM; the next tick enters the wait
+
+    // Hold the worker's wait-entry transaction open just before it commits.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let paused!: () => void;
+    const isPaused = new Promise<void>((resolve) => (paused = resolve));
+    const pausing = new Proxy(h.db, {
+      get(target, prop) {
+        if (prop !== 'connect') {
+          const value = Reflect.get(target, prop);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return async () => {
+          const client = await target.connect();
+          const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+          (client as unknown as { query: unknown }).query = async (...args: unknown[]) => {
+            if (args[0] === 'COMMIT') {
+              paused();
+              await released;
+            }
+            return query(...args);
+          };
+          return client;
+        };
+      },
+    }) as Db;
+    const entering = new Worker({ db: pausing, clock: h.clock, client: h.client }).tick();
+    await isPaused;
+
+    await h.dm('ana', 'ana@example.com');
+    await h.dispatcher.tick();
+    release();
+    await entering;
+    await h.drain();
+
+    expect((await h.runs())[0].status).toBe('completed');
+    expect(h.dmTexts().at(-1)).toBe(LINK);
   });
 });

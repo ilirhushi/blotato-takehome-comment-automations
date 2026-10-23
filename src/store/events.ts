@@ -79,17 +79,16 @@ export async function lastDmAt(q: Queryable, contact: ContactKey): Promise<Date 
   return rows[0]?.at ?? null;
 }
 
-/** The oldest DM from the contact, received at or after since, that no run has consumed yet. */
-export async function oldestUnconsumedDmSince(q: Queryable, contact: ContactKey, since: Date): Promise<InboundDm | null> {
+/** DMs from the contact, received at or after since, that no run has consumed yet, oldest first. */
+export async function unconsumedDmsSince(q: Queryable, contact: ContactKey, since: Date): Promise<InboundDm[]> {
   const { rows } = await q.query<EventRow>(
     `SELECT ${COLUMNS} FROM inbound_events
      WHERE account_id = $1 AND platform = $2 AND contact_id = $3
        AND kind = 'dm' AND consumed_by_run_id IS NULL AND received_at >= $4
-     ORDER BY id
-     LIMIT 1`,
+     ORDER BY id`,
     [contact.accountId, contact.platform, contact.contactId, since],
   );
-  return rows[0] ? (toEvent(rows[0]) as InboundDm) : null;
+  return rows.map((r) => toEvent(r) as InboundDm);
 }
 
 export async function markConsumed(q: Queryable, eventId: string, runId: string): Promise<void> {

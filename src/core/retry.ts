@@ -5,8 +5,8 @@ export interface RetryPolicy {
 }
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  maxAttempts: 5,
-  baseDelayMs: 1_000,
+  maxAttempts: 10,
+  baseDelayMs: 2_000,
   maxDelayMs: 5 * 60_000,
 };
 

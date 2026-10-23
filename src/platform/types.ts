@@ -14,15 +14,17 @@ export interface SendResult {
   messageId: string;
 }
 
+/** The engine aborts signal when it stops waiting for the call. */
 export interface PlatformClient {
-  replyToComment(input: { accountId: string; commentId: string; text: string }): Promise<SendResult>;
+  replyToComment(
+    input: { accountId: string; commentId: string; text: string },
+    signal?: AbortSignal,
+  ): Promise<SendResult>;
   /** replyToCommentId sends the DM as a private reply to that comment. */
-  sendDm(input: {
-    accountId: string;
-    contactId: string;
-    text: string;
-    replyToCommentId?: string;
-  }): Promise<SendResult>;
+  sendDm(
+    input: { accountId: string; contactId: string; text: string; replyToCommentId?: string },
+    signal?: AbortSignal,
+  ): Promise<SendResult>;
 }
 
 export interface DmFacts {

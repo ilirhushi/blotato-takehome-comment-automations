@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_RETRY_POLICY, backoffMs } from '../src/core/retry.js';
 import { advance, complete, onStepFailure, stay, type RunContext } from '../src/core/run.js';
 
 const now = new Date('2026-01-01T00:00:00Z');
@@ -56,5 +57,13 @@ describe('onStepFailure', () => {
       kind: 'fail',
       reason: 'gave up after 3 attempts: 503',
     });
+  });
+});
+
+describe('DEFAULT_RETRY_POLICY', () => {
+  it('reaches its delay cap before the attempts run out', () => {
+    const { maxAttempts, maxDelayMs } = DEFAULT_RETRY_POLICY;
+    expect(backoffMs(DEFAULT_RETRY_POLICY, maxAttempts - 1, () => 1)).toBe(maxDelayMs);
+    expect(backoffMs(DEFAULT_RETRY_POLICY, maxAttempts - 2, () => 1)).toBeLessThan(maxDelayMs);
   });
 });

@@ -14,20 +14,36 @@ import * as runs from '../store/runs.js';
  * handled under that contact's advisory lock, oldest first, so two dispatchers
  * never handle the same contact at once or out of order.
  */
+export interface DispatcherOptions {
+  batchSize?: number;
+  /** Called when one contact's events fail. They stay unprocessed and are retried on a later tick. */
+  onError?: (err: unknown, contact: ContactKey) => void;
+}
+
 export class EventDispatcher {
+  private readonly batchSize: number;
+  private readonly onError: (err: unknown, contact: ContactKey) => void;
+
   constructor(
     private readonly deps: { db: Db; clock: Clock },
-    private readonly batchSize = 20,
-  ) {}
+    opts: DispatcherOptions = {},
+  ) {
+    this.batchSize = opts.batchSize ?? 20;
+    this.onError = opts.onError ?? ((err, contact) => console.error('dispatch failed for', contact, err));
+  }
 
   /** Returns the number of events processed. */
   async tick(): Promise<number> {
     const contacts = await events.contactsWithPendingEvents(this.deps.db, this.batchSize);
     let processed = 0;
     for (const contact of contacts) {
-      processed += await withTransaction(this.deps.db, async (tx) =>
-        (await tryLockContact(tx, contact)) ? this.dispatchContact(tx, contact) : 0,
-      );
+      try {
+        processed += await withTransaction(this.deps.db, async (tx) =>
+          (await tryLockContact(tx, contact)) ? this.dispatchContact(tx, contact) : 0,
+        );
+      } catch (err) {
+        this.onError(err, contact);
+      }
     }
     return processed;
   }
@@ -56,6 +72,8 @@ export class EventDispatcher {
   }
 
   private async onComment(tx: Tx, event: Extract<InboundEvent, { kind: 'comment' }>): Promise<void> {
+    // The account's own comments, such as a reply that repeats the keyword, never trigger it.
+    if (event.contact.contactId === event.contact.accountId) return;
     const candidates = await automations.enabledForAccount(tx, event.contact);
     const busy = await runs.hasActiveRun(tx, event.contact);
     const now = this.deps.clock.now();
