@@ -30,3 +30,32 @@ any important reliability or concurrency considerations.
 
 In addition, include a short write-up describing which parts of your
 solution you developed yourself and where you used AI.
+
+---
+
+## Running the project
+
+The design and its rationale are in [ARCHITECTURE.md](ARCHITECTURE.md). This section covers running the code.
+
+Requirements: Node 20+ and Docker.
+
+```sh
+npm install
+npm run db:up       # start Postgres 16 on localhost:5433 and wait until healthy
+npm run migrate     # apply migrations/*.sql
+npm run typecheck
+npm test            # requires the database from db:up
+npm run db:down     # stop Postgres
+```
+
+Set `DATABASE_URL` to use a different database. The default is `postgres://postgres:postgres@localhost:5433/automations`.
+
+Each test file creates and migrates its own schema, so tests do not need `npm run migrate` and files run in parallel. To run a subset:
+
+```sh
+npx vitest run test/planner.test.ts   # one file
+npx vitest run -t "partial test name" # tests matching a name
+npm run test:watch                    # watch mode
+```
+
+There is no server entrypoint. The webhook endpoint is out of scope (see ARCHITECTURE.md, open items), so the engine is exercised through the tests, which drive the dispatcher, worker, and scheduler directly.
