@@ -86,4 +86,22 @@ describe('startEngine', () => {
       await engine.stop();
     }
   });
+
+  it('stops promptly when stopped during an idle tick', async () => {
+    const slow = new Proxy(h.db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== 'query') return typeof value === 'function' ? value.bind(target) : value;
+        return async (...args: unknown[]) => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return (target.query as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+    }) as Db;
+    const engine = startEngine({ db: slow, clock: h.clock, client: h.client }, { pollMs: 5_000, schedulerPollMs: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const started = Date.now();
+    await engine.stop();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
 });

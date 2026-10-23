@@ -1,5 +1,6 @@
 import { acceptReply, afterGiveUp, enterWait, firstValidValue } from '../core/conversation.js';
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from '../core/retry.js';
+import { dmText } from '../core/inbound.js';
 import { advance, complete, onStepFailure, stay, type Lease, type Run, type RunUpdate } from '../core/run.js';
 import type { Step } from '../core/types.js';
 import { isTransientDbError } from '../db/errors.js';
@@ -85,7 +86,7 @@ export class Worker {
       await withTransaction(db, async (tx) => {
         await lockContact(tx, run.contact);
         const [dm] = await events.unconsumedDmsSince(tx, run.contact, new Date(result.wait.since));
-        const reply = dm ? { eventId: dm.id, text: dm.payload.text } : null;
+        const reply = dm ? { eventId: dm.id, text: dmText(dm) } : null;
         const update = enterWait(run, result.step, result.wait, reply, clock.now());
         await this.applyAndConsume(tx, run, lease, update, dm ? [dm.id] : []);
       });
@@ -97,7 +98,7 @@ export class Worker {
         await lockContact(tx, run.contact);
         const dms = await events.unconsumedDmsSince(tx, run.contact, new Date(result.wait.since));
         const late = dms.filter((dm) => !result.consumed.includes(dm.id));
-        const value = firstValidValue(result.step, late.map((dm) => dm.payload.text));
+        const value = firstValidValue(result.step, late.map(dmText));
         const update =
           value === null
             ? complete(run, afterGiveUp(result.context))

@@ -90,6 +90,9 @@ CREATE TABLE step_executions (
   attempt             int NOT NULL DEFAULT 1,
   attempted_at        timestamptz NOT NULL DEFAULT now(), -- when the latest attempt started
   channel             text NOT NULL CHECK (channel IN ('comment_reply', 'dm', 'private_reply')),
+  -- An earlier attempt that may have been delivered without confirmation (it timed out, or its worker died).
+  uncertain_since         timestamptz, -- when the first such attempt started
+  uncertain_private_reply boolean NOT NULL DEFAULT false, -- whether any such attempt was a private reply
   status              text NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
   external_message_id text,
   error               text,

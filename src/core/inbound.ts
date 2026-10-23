@@ -30,3 +30,9 @@ export type InboundEvent = InboundEventData & {
 };
 
 export type InboundDm = Extract<InboundEvent, { kind: 'dm' }>;
+
+/** A DM's text, or '' for one without text (a sticker, an attachment, a malformed payload). */
+export function dmText(dm: InboundDm): string {
+  const text = (dm.payload as Partial<DmPayload> | null)?.text;
+  return typeof text === 'string' ? text : '';
+}

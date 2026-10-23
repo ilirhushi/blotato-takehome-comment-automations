@@ -121,6 +121,39 @@ describe('wait_for_reply', () => {
     expect(run.context.vars.email).toBe('ana@example.com');
   });
 
+  it('treats a DM without text, such as a sticker, as an invalid answer', async () => {
+    await startConversation();
+    await h.db.query(
+      `INSERT INTO inbound_events (platform, platform_event_id, account_id, contact_id, kind, payload, received_at)
+       VALUES ('instagram', 'm-sticker', 'acct-1', 'ana', 'dm', '{"message_id":"m-sticker"}', $1)`,
+      [h.clock.now()],
+    );
+    await h.drain();
+    expect(h.dmTexts().at(-1)).toBe(REPROMPT);
+
+    h.clock.advance(MINUTE);
+    await h.dm('ana', 'ana@example.com');
+    await h.drain();
+    expect((await h.runs())[0].status).toBe('completed');
+  });
+
+  it('does not fail the run over a malformed DM found while entering the wait', async () => {
+    await h.createAutomation(pricing, steps());
+    await h.comment('ana', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+    await h.worker.tick(); // prompt DM; the next tick enters the wait
+    await h.db.query(
+      `INSERT INTO inbound_events (platform, platform_event_id, account_id, contact_id, kind, payload, received_at)
+       VALUES ('instagram', 'm-null', 'acct-1', 'ana', 'dm', 'null', $1)`,
+      [h.clock.now()],
+    );
+    await h.drain();
+    const [run] = await h.runs();
+    expect(run).toMatchObject({ status: 'waiting', error: null });
+    expect(h.dmTexts().at(-1)).toBe(REPROMPT);
+  });
+
   it('expires the run after the timeout and ignores later replies', async () => {
     await startConversation();
     h.clock.advance(59 * MINUTE - 1);
@@ -151,6 +184,26 @@ describe('wait_for_reply', () => {
     const [run] = await h.runs();
     expect(run.status).toBe('waiting');
     expect(run.context.wait.reprompts).toBe(0);
+  });
+
+  it('accepts a reply to a prompt that was delivered but whose call timed out', async () => {
+    await h.createAutomation(pricing, steps());
+    await h.comment('ana', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+    const release = h.client.holdNext();
+    await h.newWorker({ sendTimeoutMs: 20 }).tick(); // the private reply is delivered, but the call times out
+    release();
+
+    h.clock.advance(1_000);
+    await h.dm('ana', 'ana@example.com');
+    h.clock.advance(1_000);
+    await h.drain();
+
+    expect(h.dmTexts().at(-1)).toBe(LINK);
+    const [run] = await h.runs();
+    expect(run.status).toBe('completed');
+    expect(run.context.private_reply_used).toBe(true);
   });
 
   it('consumes a reply that arrives before the run starts waiting', async () => {
@@ -197,7 +250,7 @@ describe('wait_for_reply', () => {
     expect(run.context.wait.reprompts).toBe(1);
   });
 
-  it('resumes once when two dispatchers handle concurrent DMs from the same contact', async () => {
+  it('handles concurrent DMs from the same contact once across several dispatchers', async () => {
     await startConversation();
     await h.dm('ana', 'ana@example.com');
     await h.dm('ana', 'ana+second@example.com');
@@ -243,19 +296,51 @@ describe('wait_for_reply', () => {
 
   it('expires the run once an undispatchable DM from before the deadline is dead-lettered', async () => {
     await startConversation();
-    await h.db.query(
-      `INSERT INTO inbound_events (platform, platform_event_id, account_id, contact_id, kind, payload, received_at)
-       VALUES ('instagram', 'm-broken', 'acct-1', 'ana', 'dm', 'null', $1)`,
-      [h.clock.now()],
-    );
-    h.clock.advance(60 * MINUTE);
-    const dispatcher = new EventDispatcher({ db: h.db, clock: h.clock }, { onError: () => {} });
-    for (let i = 0; i < 4; i++) {
+    // Dispatching this DM always fails: marking it processed is rejected unless it is being dead-lettered.
+    await h.db.query(`
+      CREATE FUNCTION reject_broken() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'broken'; END $$;
+      CREATE TRIGGER reject_broken BEFORE UPDATE OF processed_at ON inbound_events
+        FOR EACH ROW WHEN (NEW.platform_event_id = 'm-broken' AND NEW.processed_at IS NOT NULL
+                           AND NEW.dead_lettered_at IS NULL)
+        EXECUTE FUNCTION reject_broken();`);
+    try {
+      await h.dm('ana', 'not an email', { messageId: 'm-broken' });
+      h.clock.advance(60 * MINUTE);
+      const dispatcher = new EventDispatcher({ db: h.db, clock: h.clock }, { onError: () => {} });
+      for (let i = 0; i < 4; i++) {
+        await dispatcher.tick();
+        expect(await h.scheduler.tick()).toBe(0);
+      }
       await dispatcher.tick();
-      expect(await h.scheduler.tick()).toBe(0);
+      expect(await h.scheduler.tick()).toBe(1);
+    } finally {
+      await h.db.query(`DROP TRIGGER reject_broken ON inbound_events; DROP FUNCTION reject_broken();`);
     }
-    await dispatcher.tick();
-    expect(await h.scheduler.tick()).toBe(1);
+  });
+
+  it('does not count transient database errors toward dead-lettering', async () => {
+    await startConversation();
+    await h.db.query(`
+      CREATE SEQUENCE deadlocks;
+      CREATE FUNCTION fake_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF nextval('deadlocks') <= 6 THEN RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01'; END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fake_deadlock BEFORE UPDATE ON runs
+        FOR EACH ROW WHEN (OLD.status = 'waiting' AND NEW.status = 'running') EXECUTE FUNCTION fake_deadlock();`);
+    try {
+      await h.dm('ana', 'ana@example.com');
+      const dispatcher = new EventDispatcher({ db: h.db, clock: h.clock }, { onError: () => {} });
+      for (let i = 0; i < 6; i++) expect(await dispatcher.tick()).toBe(0);
+      await h.drain();
+      expect(h.dmTexts().at(-1)).toBe(LINK);
+      const { rows } = await h.db.query(`SELECT dispatch_failures, dead_lettered_at FROM inbound_events WHERE kind = 'dm'`);
+      expect(rows).toEqual([{ dispatch_failures: 0, dead_lettered_at: null }]);
+    } finally {
+      await h.db.query(`DROP TRIGGER fake_deadlock ON runs; DROP FUNCTION fake_deadlock(); DROP SEQUENCE deadlocks;`);
+    }
   });
 
   it('ignores a reply sent after the deadline even if the scheduler has not run yet', async () => {
@@ -359,13 +444,20 @@ describe('races at the wait step', () => {
         }
         return async () => {
           const client = await target.connect();
-          const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
-          (client as unknown as { query: unknown }).query = async (...args: unknown[]) => {
+          const patched = client as unknown as { query: unknown; release: (...args: unknown[]) => void };
+          const { query, release: releaseClient } = patched;
+          patched.query = async (...args: unknown[]) => {
             if (args[0] === 'COMMIT') {
               paused();
               await released;
             }
-            return query(...args);
+            return (query as (...a: unknown[]) => Promise<unknown>).apply(client, args);
+          };
+          // Undo the patch before the client goes back to the pool.
+          patched.release = (...args: unknown[]) => {
+            patched.query = query;
+            patched.release = releaseClient;
+            return releaseClient.apply(client, args);
           };
           return client;
         };

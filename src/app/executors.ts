@@ -18,7 +18,7 @@ async function sendDirectMessage(ctx: StepContext, effectKey: string, text: stri
     lastInboundDmAt: await ctx.lastInboundDmAt(),
   });
   const privateReply = permission.ok && permission.mode === 'private_reply';
-  const sent = await ctx.send(effectKey, privateReply ? 'private_reply' : 'dm', async (signal, attempt) => {
+  const sent = await ctx.send(effectKey, privateReply ? 'private_reply' : 'dm', async (signal, pending) => {
     if (!permission.ok) throw new PermanentStepError(permission.reason);
     try {
       return await ctx.client.sendDm(
@@ -31,12 +31,12 @@ async function sendDirectMessage(ctx: StepContext, effectKey: string, text: stri
         signal,
       );
     } catch (err) {
-      // An earlier attempt of this same send may have been delivered without us recording it.
-      if (err instanceof PrivateReplyAlreadyUsedError && attempt > 1) return { messageId: null };
+      // An earlier attempt of this same send may have been delivered without us knowing.
+      if (err instanceof PrivateReplyAlreadyUsedError && pending.uncertainPrivateReply) return { messageId: null };
       throw err;
     }
   });
-  return sent.channel === 'private_reply' ? { ...run.context, private_reply_used: true } : run.context;
+  return sent.privateReplyUsed ? { ...run.context, private_reply_used: true } : run.context;
 }
 
 // Typed over StepType, so adding a step type without an executor fails to compile.

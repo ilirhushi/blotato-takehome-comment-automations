@@ -1,8 +1,9 @@
 import type { Clock } from '../clock.js';
 import { canAnswer, resumeWithReply } from '../core/conversation.js';
-import type { InboundDm, InboundEvent } from '../core/inbound.js';
+import { dmText, type InboundDm, type InboundEvent } from '../core/inbound.js';
 import { planRunsForComment } from '../core/planner.js';
 import type { ContactKey } from '../core/types.js';
+import { isTransientDbError } from '../db/errors.js';
 import { withSavepoint, withTransaction, type Db, type Tx } from '../db/pool.js';
 import * as automations from '../store/automations.js';
 import * as events from '../store/events.js';
@@ -68,6 +69,8 @@ export class EventDispatcher {
         });
       } catch (err) {
         this.onError(err, contact);
+        // A deadlock or similar says nothing about the event: retry it next tick without counting.
+        if (isTransientDbError(err)) break;
         const message = err instanceof Error ? err.message : String(err);
         const dead = await events.recordDispatchFailure(tx, event.id, message, this.maxFailures, this.deps.clock.now());
         if (!dead) break;
@@ -86,7 +89,7 @@ export class EventDispatcher {
     const run = await runs.findWaiting(tx, dm.contact);
     if (!run || !canAnswer(run, dm.receivedAt)) return;
     const now = this.deps.clock.now();
-    const update = resumeWithReply(run, run.context.wait, { eventId: dm.id, text: dm.payload.text }, now);
+    const update = resumeWithReply(run, run.context.wait, { eventId: dm.id, text: dmText(dm) }, now);
     if (await runs.resumeIfWaiting(tx, run.id, update, now)) await events.markConsumed(tx, dm.id, run.id);
   }
 

@@ -3,7 +3,7 @@ import { EventDispatcher } from '../src/app/event-dispatcher.js';
 import { Worker } from '../src/app/worker.js';
 import type { ContactKey } from '../src/core/types.js';
 import { withTransaction, type Db } from '../src/db/pool.js';
-import { PermanentPlatformError, TransientPlatformError } from '../src/platform/types.js';
+import { PermanentPlatformError, PrivateReplyAlreadyUsedError, TransientPlatformError } from '../src/platform/types.js';
 import { lockContact } from '../src/store/locks.js';
 import { createTestDb, type TestDb } from './helpers.js';
 import { ACCOUNT, createHarness, type Harness } from './harness.js';
@@ -423,6 +423,21 @@ describe('leases', () => {
     expect(run.context.private_reply_used).toBe(true);
     expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply', 'dm']);
     expect((await h.stepExecutions())[1]).toMatchObject({ attempt: 2, status: 'sent' });
+  });
+
+  it('fails on a rejected private reply when no earlier attempt can have sent it', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+    // The first attempt fails outright; then someone else uses the comment's private reply.
+    h.client.failNext(new TransientPlatformError('503'), new PrivateReplyAlreadyUsedError('already replied'));
+    await h.worker.tick();
+    h.clock.advance(2_000);
+    await h.drain();
+
+    expect((await h.runs())[0]).toMatchObject({ status: 'failed', error: 'already replied' });
+    expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply']);
   });
 
   it('remembers a private reply was used when a sent DM is replayed after the window opened', async () => {
