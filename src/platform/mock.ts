@@ -1,4 +1,4 @@
-import type { PlatformClient, PlatformError, SendResult } from './types.js';
+import { PrivateReplyAlreadyUsedError, type PlatformClient, type PlatformError, type SendResult } from './types.js';
 
 export type SentMessage =
   | { kind: 'comment_reply'; messageId: string; accountId: string; commentId: string; text: string }
@@ -15,6 +15,7 @@ export class MockPlatformClient implements PlatformClient {
   readonly sent: SentMessage[] = [];
   private failures: PlatformError[] = [];
   private holds: Promise<void>[] = [];
+  private privateReplies = new Set<string>();
   private nextId = 1;
 
   /** The next calls fail with these errors, in order, without sending anything. */
@@ -47,6 +48,12 @@ export class MockPlatformClient implements PlatformClient {
     replyToCommentId?: string;
   }): Promise<SendResult> {
     this.throwIfFailing();
+    if (input.replyToCommentId) {
+      if (this.privateReplies.has(input.replyToCommentId)) {
+        throw new PrivateReplyAlreadyUsedError(`comment ${input.replyToCommentId} already has a private reply`);
+      }
+      this.privateReplies.add(input.replyToCommentId);
+    }
     const messageId = this.newId();
     this.sent.push({ kind: 'dm', messageId, ...input });
     await this.holds.shift();

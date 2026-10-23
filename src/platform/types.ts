@@ -8,6 +8,9 @@ export class PermanentPlatformError extends Error {
   readonly transient = false;
 }
 
+/** The comment already has its one private reply. */
+export class PrivateReplyAlreadyUsedError extends PermanentPlatformError {}
+
 export type PlatformError = TransientPlatformError | PermanentPlatformError;
 
 export interface SendResult {

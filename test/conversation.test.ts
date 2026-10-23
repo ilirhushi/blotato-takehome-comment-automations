@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { publishVersion } from '../src/app/automations.js';
 import { TransientPlatformError } from '../src/platform/types.js';
+import { EventDispatcher } from '../src/app/event-dispatcher.js';
 import { Worker } from '../src/app/worker.js';
 import type { Db } from '../src/db/pool.js';
 import { setEnabled } from '../src/store/automations.js';
@@ -99,6 +100,27 @@ describe('wait_for_reply', () => {
     ]);
   });
 
+  it('accepts a valid email that arrives while the give-up message is being sent', async () => {
+    await startConversation(0);
+    await h.dm('ana', 'nope');
+    await h.dispatcher.tick();
+
+    const release = h.client.holdNext();
+    const givingUp = h.worker.tick();
+    await expect.poll(() => h.dmTexts().length).toBe(2);
+    await h.dm('ana', 'ana@example.com');
+    await h.dispatcher.tick();
+    release();
+    await givingUp;
+    await h.drain();
+
+    expect(h.dmTexts().slice(1)).toEqual(['No problem, user_ana. Comment again any time!', LINK]);
+    const [run] = await h.runs();
+    expect(run.status).toBe('completed');
+    expect(run.context.outcome).toBeUndefined();
+    expect(run.context.vars.email).toBe('ana@example.com');
+  });
+
   it('expires the run after the timeout and ignores later replies', async () => {
     await startConversation();
     h.clock.advance(59 * MINUTE - 1);
@@ -110,6 +132,25 @@ describe('wait_for_reply', () => {
     await h.drain();
     expect((await h.runs())[0].status).toBe('expired');
     expect(h.dmTexts()).toHaveLength(1);
+  });
+
+  it('does not treat a DM sent before a retried prompt was delivered as the answer', async () => {
+    await h.createAutomation(pricing, steps());
+    await h.comment('ana', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+    h.client.failNext(new TransientPlatformError('503'));
+    await h.worker.tick(); // the prompt fails
+
+    h.clock.advance(1_000);
+    await h.dm('ana', 'hello? did you send it?');
+    h.clock.advance(1_000);
+    await h.drain();
+
+    expect(h.dmTexts()).toEqual(['Hi user_ana! What is your email?']);
+    const [run] = await h.runs();
+    expect(run.status).toBe('waiting');
+    expect(run.context.wait.reprompts).toBe(0);
   });
 
   it('consumes a reply that arrives before the run starts waiting', async () => {
@@ -197,6 +238,23 @@ describe('wait_for_reply', () => {
     h.clock.advance(60 * MINUTE);
     expect(await h.scheduler.tick()).toBe(0);
     await h.dispatcher.tick();
+    expect(await h.scheduler.tick()).toBe(1);
+  });
+
+  it('expires the run once an undispatchable DM from before the deadline is dead-lettered', async () => {
+    await startConversation();
+    await h.db.query(
+      `INSERT INTO inbound_events (platform, platform_event_id, account_id, contact_id, kind, payload, received_at)
+       VALUES ('instagram', 'm-broken', 'acct-1', 'ana', 'dm', 'null', $1)`,
+      [h.clock.now()],
+    );
+    h.clock.advance(60 * MINUTE);
+    const dispatcher = new EventDispatcher({ db: h.db, clock: h.clock }, { onError: () => {} });
+    for (let i = 0; i < 4; i++) {
+      await dispatcher.tick();
+      expect(await h.scheduler.tick()).toBe(0);
+    }
+    await dispatcher.tick();
     expect(await h.scheduler.tick()).toBe(1);
   });
 

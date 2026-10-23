@@ -71,9 +71,9 @@ Implementation status: decisions 1–17 are implemented. Decision 18 (rate limit
 
 **Why not row locks with `SKIP LOCKED` here.** Two dispatchers would each lock one of a contact's events and then each wait for the contact lock the other holds: a deadlock. With the contact lock as the only mutual exclusion there is no lock ordering to get wrong, and a contact's events are never handled out of order or by two dispatchers at once.
 
-**Failure isolation.** Each contact is its own transaction. If one contact's events fail, that transaction rolls back, the error is reported, and the dispatcher moves on to the next contact. The failed events stay unprocessed and are retried on the next tick.
+**Failure isolation.** Each event is handled inside a savepoint. If it fails, only that event's work is rolled back, the error is reported, and its `dispatch_failures` count goes up. The contact's later events wait behind it, so they are never handled out of order, and the dispatcher moves on to the next contact. After 5 failures the event is dead-lettered: marked processed, with `dead_lettered_at` and the last error kept, and never used as a reply. Without this, an event that always fails would block its contact forever, keep its waiting run from expiring, and, once there were as many of them as the batch size, stop dispatch for everyone.
 
-**The account's own comments** never trigger an automation, so a public reply that repeats the keyword cannot start a run against the account itself. This assumes `account_id` is the connected account's platform user id. The webhook layer is expected to drop these too (open item 8); the dispatcher check is defense in depth.
+**The account's own comments** never trigger an automation, so a public reply that repeats the keyword cannot start a run against the account itself. This assumes `account_id` is the connected account's platform user id. The webhook layer is expected to drop these too (open item 7); the dispatcher check is defense in depth.
 
 **Caveat.** `id` reflects insert order, not commit order, so two webhooks for the same contact that arrive within milliseconds could be handled in the other order. Platforms do not guarantee webhook ordering anyway.
 
@@ -114,12 +114,17 @@ Implementation status: decisions 1–17 are implemented. Decision 18 (rate limit
 
 The attempt counter also bounds crash loops. A worker that dies after every platform call never records a failure, so the retry policy never sees it. Each new attempt still increments `attempt` when it is marked `pending`, and an attempt past the limit fails the run instead of sending again.
 
-**Why not exactly-once.** If a worker crashes after the platform accepted the message but before `sent` is committed, the row stays `pending` and the retry sends it again. Closing that window requires the platform to deduplicate on an idempotency key we supply, and the messaging APIs we target do not offer one. Lease fencing cannot help either: a stale worker may already be inside the platform call when its lease expires. The trade is a rare duplicate message rather than a lost one. A test demonstrates exactly this case.
+Each row also records the `channel` it was sent on (`comment_reply`, `dm`, `private_reply`). When a step is replayed after its effect was already sent, the executor uses the recorded channel rather than recomputing it from current facts, which may have changed since (decision 13).
+
+**Why not exactly-once.** If a worker crashes after the platform accepted the message but before `sent` is committed, the row stays `pending` and the retry sends it again. Closing that window requires the platform to deduplicate on an idempotency key we supply, and the messaging APIs we target do not offer one. Lease fencing cannot help either: a stale worker may already be inside the platform call when its lease expires. The trade is a rare duplicate message rather than a lost one. A test demonstrates exactly this case. Platform call timeouts (decision 10) add another source: a call that timed out may still have been delivered, and its retry sends it again.
+
+**Duplicate private replies.** Instagram allows one private reply per comment, so a duplicate private reply is rejected rather than delivered twice. If a retried private reply is rejected that way and an earlier attempt of the same send exists, that earlier attempt must have been delivered, so the effect is recorded as `sent` with no message id and the run continues. On a first attempt the same rejection is a real failure. This relies on the platform client turning Instagram's error into `PrivateReplyAlreadyUsedError`; the mock enforces the rule.
 
 ## 12. Retries and failure classification
 
 **Decision.**
 - `TransientPlatformError`, a platform call that timed out, and a transient database error (dropped connection, failover, deadlock, serialization failure): retried with exponential backoff and full jitter. Base 2 s, cap 5 min, at most 10 attempts.
+- Attempts are counted per step, in `runs.failures`, which resets whenever the step completes. This counts every failure of the step, including database errors before or after the platform call. The per-send `attempt` in `step_executions` only bounds crash loops (decision 11).
 - `PermanentPlatformError` and a refusal from the platform rules: the run fails immediately with the reason in `runs.error`.
 - Any other error (a bug): treated as permanent.
 
@@ -135,7 +140,7 @@ The attempt counter also bounds crash loops. A worker that dies after every plat
 
 **Why.** Platform policy changes independently of the engine, and a pure function is trivial to test. The permission check runs inside the `send` bookkeeping, so a DM that was already sent is never blocked on replay, and a refusal is recorded in `step_executions`.
 
-`private_reply_used` is tracked in the run context. That is equivalent to tracking it per comment, because one comment produces at most one non-skipped run.
+`private_reply_used` is tracked in the run context. That is equivalent to tracking it per comment, because one comment produces at most one non-skipped run. It is set from the channel the DM was actually delivered on, which is recorded with the send, so a replay cannot lose it.
 
 ## 14. The wait step
 
@@ -160,7 +165,7 @@ stateDiagram-v2
 - *Resume vs. expiry.* Both are conditional updates on `status = 'waiting'`. Postgres row locking lets exactly one win, and the DM is consumed only if the resume won.
 - *Lease lost while entering the wait.* The transaction rolls back, including the consumption of the DM.
 
-**The anchor (`wait.since`).** The time the prompt DM was first queued (its `pending` row), not when it was marked `sent`. The `sent` time is recorded after the platform call returns, and a fast reply can arrive before that. The anchor is set once when the run first enters the wait. Re-prompts do not move it, so messages sent while a re-prompt was on its way are still considered rather than dropped.
+**The anchor (`wait.since`).** The time the attempt that delivered the prompt started (`attempted_at` on its `sent` row), not when it was marked `sent`. The `sent` time is recorded after the platform call returns, and a fast reply can arrive before that. It is not the first attempt either: if that attempt failed, a DM sent before the retry delivered the prompt would otherwise count as the answer, and with the retry budget that window can be over 10 minutes. The anchor is set once when the run first enters the wait. Re-prompts do not move it, so messages sent while a re-prompt was on its way are still considered rather than dropped.
 
 **Messages that arrive together are one answer.** People send "hi!", "one sec", then their email. When the worker evaluates the reply that resumed the run, it also takes every other unconsumed DM received since the anchor, and consumes them all in the same transaction as the run update, under the contact lock. Without this, each chatty message would cost a re-prompt, and a contact could be given up on before their email was even read.
 
@@ -168,6 +173,7 @@ stateDiagram-v2
 - Valid: the first valid value in the batch is saved to `vars[save_as]` and the run advances. Later valid values are consumed and ignored.
 - Invalid, with re-prompts left: the whole batch counts as one invalid answer. Send `reprompt_text`, then wait again. Each re-prompt resets the deadline.
 - Invalid, no re-prompts left: send `give_up_text` and end the run as `completed` with `context.outcome = 'gave_up'`. It is not `failed`, because nothing broke, and `failed` should be safe to alert on.
+- A valid answer that arrives while the give-up message is being sent is not lost. Before ending the run, the worker checks again under the contact lock. If a valid answer is there, the run takes it and continues: the contact sees the give-up message followed by the link, which is awkward but better than dropping their answer. A DM after that check finds the run already ended.
 
 **Expiry.** A scheduler loop sets `status = 'expired'` on waiting runs past `wake_at`. Nothing is sent. The deadline is judged by when a DM was received, not when it was dispatched, in both directions:
 - The dispatcher refuses DMs received after the deadline, so a lagging scheduler cannot let a late reply through.
@@ -218,16 +224,15 @@ The remaining window is a DM whose insert has not committed when the scheduler r
 - **Core:** pure unit tests, no database.
 - **Engine behavior:** tests against real Postgres, one schema per test file so files run in parallel. Concurrency guarantees only exist in the real database, so they are not faked.
 - **Determinism:** tests drive the dispatcher, worker, and scheduler with explicit `tick()` calls and a fake clock. Concurrency tests still run several ticks in parallel.
-- **Failure-mode tests:** beyond the scenarios derived from the design, there are tests for what happens when something is late, interrupted, or doubled: a worker dying mid-send (once, and repeatedly), a platform call that hangs, a dropped database connection, a contact whose events always fail, a lagging scheduler, a lagging dispatcher at the deadline, a burst of DMs, a re-prompt that fails transiently.
+- **Failure-mode tests:** beyond the scenarios derived from the design, there are tests for what happens when something is late, interrupted, or doubled: a worker dying mid-send (once, repeatedly, and after a private reply), a platform call that hangs, a dropped database connection before and after a send, events that always fail, a lagging scheduler, a lagging dispatcher at the deadline, a burst of DMs, a DM sent before a retried prompt was delivered, a valid answer arriving during the give-up message, a re-prompt that fails transiently.
 - **Tests that can fail:** each concurrency test was checked by removing the guarantee it covers (lease fencing, the dispatcher's contact lock, the lease check in the claim, the expiry check for undispatched DMs, the contact lock on entering the wait) and confirming the test fails. The race at the wait step is made deterministic by holding the worker's transaction open just before it commits. Removing `SKIP LOCKED` is not detected: without it, claims block and retry, which is slower but still correct.
 
 ## Open items
 
-1. **Anchor on retried prompts.** The anchor is when the prompt's first attempt was queued. If that attempt fails and a retry succeeds, a DM that arrived in between can count as the answer. A valid email is accepted, and anything else gets a re-prompt, so the effect is benign. The anchor comes from the worker's clock and `received_at` from the ingesting process's clock, so clock skew between machines shifts this boundary too.
-2. **Bursts that straddle a re-prompt.** A batch is everything unconsumed when the reply is evaluated. A message sent after that, but before the contact sees the re-prompt, counts as the next answer.
+1. **Ingest time, not platform time.** `received_at` is when the webhook was stored. A delayed or re-delivered webhook for an on-time reply can arrive after the deadline and be refused, and the 24-hour DM window is judged on stale data. The anchor also comes from the worker's clock while `received_at` comes from the ingesting process's clock, so clock skew shifts the boundary. Using the platform's message timestamp needs the payload normalization from item 7.
+2. **Bursts that straddle a re-prompt.** A batch is everything unconsumed when the reply is evaluated. A message sent after that, but before the contact sees the re-prompt, counts as the next answer. (The give-up case is handled; see decision 14.)
 3. **Several valid replies.** If two valid emails arrive together, the first is used and the second is consumed and ignored. This is intended.
-4. **Events that always fail.** A contact whose events fail every time is retried on every tick, forever. It takes one slot of each dispatcher batch and, because its DMs stay unprocessed, keeps its waiting run from expiring. Production needs a failure count and a dead-letter state on `inbound_events`.
+4. **Dead-lettered events have no tooling.** They are kept with their last error, but there is no alert, operator view, or replay.
 5. **Dispatcher scaling.** Every dispatcher reads the same oldest contacts, and the ones that lose the lock skip them, so extra dispatchers add little throughput. Partitioning contacts across dispatchers, or claiming contacts with `SKIP LOCKED` on a per-contact row, would fix this.
-6. **Transient database errors before a send** are retried without an attempt limit, because attempts are counted per send. Only an error that is both classified as transient and deterministic would loop, which is unlikely, but a per-step failure counter on `runs` would bound it.
-7. **Intentionally deferred:** the rate limiter (decision 18).
-8. **Not yet built:** the webhook HTTP endpoint with payload normalization (including dropping echoes of our own messages and self-authored comments), and the process entrypoint. The implemented work should therefore be understood as the backend workflow engine, not a fully deployable webhook service.
+6. **Intentionally deferred:** the rate limiter (decision 18).
+7. **Not yet built:** the webhook HTTP endpoint with payload normalization (including dropping echoes of our own messages and self-authored comments), and the process entrypoint. The implemented work should therefore be understood as the backend workflow engine, not a fully deployable webhook service.

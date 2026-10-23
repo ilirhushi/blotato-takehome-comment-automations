@@ -1,7 +1,8 @@
-import { acceptReply, afterGiveUp, afterReprompt, decideOnReplies } from '../core/conversation.js';
+import { acceptReply, afterReprompt, decideOnReplies } from '../core/conversation.js';
 import type { RunContext } from '../core/run.js';
 import { renderTemplate } from '../core/template.js';
 import type { Step, StepType } from '../core/types.js';
+import { PrivateReplyAlreadyUsedError } from '../platform/types.js';
 import { PermanentStepError } from './errors.js';
 import type { StepContext, StepResult } from './step-context.js';
 
@@ -16,20 +17,26 @@ async function sendDirectMessage(ctx: StepContext, effectKey: string, text: stri
     privateReplyUsed: run.context.private_reply_used ?? false,
     lastInboundDmAt: await ctx.lastInboundDmAt(),
   });
-  await ctx.send(effectKey, (signal) => {
+  const privateReply = permission.ok && permission.mode === 'private_reply';
+  const sent = await ctx.send(effectKey, privateReply ? 'private_reply' : 'dm', async (signal, attempt) => {
     if (!permission.ok) throw new PermanentStepError(permission.reason);
-    return ctx.client.sendDm(
-      {
-        accountId: run.contact.accountId,
-        contactId: run.contact.contactId,
-        text,
-        replyToCommentId: permission.mode === 'private_reply' ? run.context.comment.id : undefined,
-      },
-      signal,
-    );
+    try {
+      return await ctx.client.sendDm(
+        {
+          accountId: run.contact.accountId,
+          contactId: run.contact.contactId,
+          text,
+          replyToCommentId: privateReply ? run.context.comment.id : undefined,
+        },
+        signal,
+      );
+    } catch (err) {
+      // An earlier attempt of this same send may have been delivered without us recording it.
+      if (err instanceof PrivateReplyAlreadyUsedError && attempt > 1) return { messageId: null };
+      throw err;
+    }
   });
-  const usedPrivateReply = permission.ok && permission.mode === 'private_reply';
-  return usedPrivateReply ? { ...run.context, private_reply_used: true } : run.context;
+  return sent.channel === 'private_reply' ? { ...run.context, private_reply_used: true } : run.context;
 }
 
 // Typed over StepType, so adding a step type without an executor fails to compile.
@@ -37,7 +44,7 @@ const executors: { [T in StepType]: StepExecutor<Extract<Step, { type: T }>> } =
   async reply_to_comment(ctx, step) {
     const { run } = ctx;
     const text = renderTemplate(step.text, run.context.vars);
-    await ctx.send('main', (signal) =>
+    await ctx.send('main', 'comment_reply', (signal) =>
       ctx.client.replyToComment({ accountId: run.contact.accountId, commentId: run.context.comment.id, text }, signal),
     );
     return { type: 'advance' };
@@ -70,7 +77,7 @@ const executors: { [T in StepType]: StepExecutor<Extract<Step, { type: T }>> } =
       }
       case 'give_up': {
         const sent = await sendDirectMessage(ctx, 'give_up', renderTemplate(step.give_up_text, context.vars));
-        return { type: 'complete', context: afterGiveUp(sent), consumed };
+        return { type: 'give_up', step, wait, context: sent, consumed };
       }
     }
   },

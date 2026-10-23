@@ -1,4 +1,4 @@
-import { enterWait } from '../core/conversation.js';
+import { acceptReply, afterGiveUp, enterWait, firstValidValue } from '../core/conversation.js';
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from '../core/retry.js';
 import { advance, complete, onStepFailure, stay, type Lease, type Run, type RunUpdate } from '../core/run.js';
 import type { Step } from '../core/types.js';
@@ -63,7 +63,7 @@ export class Worker {
         {
           transient: err instanceof TransientPlatformError || isTransientDbError(err),
           message: err instanceof Error ? err.message : String(err),
-          attempt: Math.max(ctx.lastAttempt, 1),
+          attempt: run.failures + 1,
         },
         this.retryPolicy,
         clock.now(),
@@ -88,6 +88,21 @@ export class Worker {
         const reply = dm ? { eventId: dm.id, text: dm.payload.text } : null;
         const update = enterWait(run, result.step, result.wait, reply, clock.now());
         await this.applyAndConsume(tx, run, lease, update, dm ? [dm.id] : []);
+      });
+      return;
+    }
+    if (result.type === 'give_up') {
+      // Under the contact lock, so a DM that arrives after this check finds the run already ended.
+      await withTransaction(db, async (tx) => {
+        await lockContact(tx, run.contact);
+        const dms = await events.unconsumedDmsSince(tx, run.contact, new Date(result.wait.since));
+        const late = dms.filter((dm) => !result.consumed.includes(dm.id));
+        const value = firstValidValue(result.step, late.map((dm) => dm.payload.text));
+        const update =
+          value === null
+            ? complete(run, afterGiveUp(result.context))
+            : advance(run, stepCount, acceptReply(result.context, result.step, value), clock.now());
+        await this.applyAndConsume(tx, run, lease, update, [...result.consumed, ...late.map((dm) => dm.id)]);
       });
       return;
     }

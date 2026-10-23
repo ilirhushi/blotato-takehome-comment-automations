@@ -7,12 +7,18 @@ export type ReplyDecision =
   | { kind: 'reprompt'; number: number }
   | { kind: 'give_up' };
 
-/** Messages that arrived together count as one answer: the first valid value wins, otherwise one re-prompt. */
-export function decideOnReplies(step: WaitForReplyStep, wait: WaitState, texts: string[]): ReplyDecision {
+export function firstValidValue(step: WaitForReplyStep, texts: string[]): string | null {
   for (const text of texts) {
     const value = validateReply(step.validator, text);
-    if (value !== null) return { kind: 'accept', value };
+    if (value !== null) return value;
   }
+  return null;
+}
+
+/** Messages that arrived together count as one answer: the first valid value wins, otherwise one re-prompt. */
+export function decideOnReplies(step: WaitForReplyStep, wait: WaitState, texts: string[]): ReplyDecision {
+  const value = firstValidValue(step, texts);
+  if (value !== null) return { kind: 'accept', value };
   if (wait.reprompts < step.max_reprompts) return { kind: 'reprompt', number: wait.reprompts + 1 };
   return { kind: 'give_up' };
 }

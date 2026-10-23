@@ -76,7 +76,7 @@ describe('schema', () => {
     const { rows: [run] } = await t.db.query(`SELECT id FROM runs`);
     const insert = (key: string) =>
       t.db.query(
-        `INSERT INTO step_executions (run_id, step_index, effect_key, status) VALUES ($1, 2, $2, 'pending')`,
+        `INSERT INTO step_executions (run_id, step_index, effect_key, channel, status) VALUES ($1, 2, $2, 'dm', 'pending')`,
         [run.id, key],
       );
     await insert('main');

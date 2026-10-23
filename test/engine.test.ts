@@ -129,6 +129,33 @@ describe('dispatching comments', () => {
   });
 });
 
+/** Makes every run insert for contact 'poison' fail, as a stand-in for an event that always breaks dispatch. */
+const createPoison = () =>
+  h.db.query(`
+    CREATE FUNCTION reject_poison() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'poisoned'; END $$;
+    CREATE TRIGGER reject_poison BEFORE INSERT ON runs
+      FOR EACH ROW WHEN (NEW.contact_id = 'poison') EXECUTE FUNCTION reject_poison();`);
+const dropPoison = () => h.db.query(`DROP TRIGGER reject_poison ON runs; DROP FUNCTION reject_poison();`);
+
+/** A pool whose query fails with a dropped connection whenever the SQL matches. */
+function flakyDb(db: Db, matches: (sql: string) => boolean, times = Infinity) {
+  const state = { failures: 0 };
+  const proxy = new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop !== 'query') return Reflect.get(target, prop, receiver);
+      return (...args: unknown[]) => {
+        if (state.failures < times && matches(String(args[0]))) {
+          state.failures++;
+          return Promise.reject(new Error('Connection terminated unexpectedly'));
+        }
+        return (target.query as (...a: unknown[]) => unknown)(...args);
+      };
+    },
+  }) as Db;
+  return { db: proxy, state };
+}
+
 describe('dispatcher isolation', () => {
   it('leaves a contact alone while another transaction holds its lock', async () => {
     await h.createAutomation(pricing, replyAndDm);
@@ -153,11 +180,7 @@ describe('dispatcher isolation', () => {
 
   it('keeps dispatching other contacts when one contact fails', async () => {
     await h.createAutomation(pricing, replyAndDm);
-    await h.db.query(`
-      CREATE FUNCTION reject_poison() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'poisoned'; END $$;
-      CREATE TRIGGER reject_poison BEFORE INSERT ON runs
-        FOR EACH ROW WHEN (NEW.contact_id = 'poison') EXECUTE FUNCTION reject_poison();`);
+    await createPoison();
     try {
       await h.comment('poison', 'pricing');
       await h.comment('alice', 'pricing');
@@ -170,8 +193,42 @@ describe('dispatcher isolation', () => {
       expect(await dispatcher.tick()).toBe(1);
       expect(errors).toEqual(['poison: poisoned']);
       expect((await h.runs()).map((r) => r.contact_id)).toEqual(['alice']);
+      const { rows } = await h.db.query(
+        `SELECT processed_at, dispatch_failures, last_dispatch_error FROM inbound_events WHERE contact_id = 'poison'`,
+      );
+      expect(rows).toEqual([{ processed_at: null, dispatch_failures: 1, last_dispatch_error: 'poisoned' }]);
     } finally {
-      await h.db.query(`DROP TRIGGER reject_poison ON runs; DROP FUNCTION reject_poison();`);
+      await dropPoison();
+    }
+  });
+
+  it('dead-letters an event after 5 failed dispatches, so the contact and the batch move on', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await createPoison();
+    try {
+      await h.comment('poison', 'pricing');
+      await h.comment('poison', 'pricing again');
+      await h.comment('alice', 'pricing');
+      const dispatcher = new EventDispatcher({ db: h.db, clock: h.clock }, { batchSize: 1, onError: () => {} });
+
+      for (let i = 0; i < 4; i++) expect(await dispatcher.tick()).toBe(0);
+      expect(await dispatcher.tick()).toBe(1); // dead-letters the first poison comment; the second fails once
+      for (let i = 0; i < 3; i++) expect(await dispatcher.tick()).toBe(0);
+      expect(await dispatcher.tick()).toBe(1); // dead-letters the second
+      expect(await dispatcher.tick()).toBe(1); // alice
+      expect((await h.runs()).map((r) => r.contact_id)).toEqual(['alice']);
+
+      const { rows } = await h.db.query(
+        `SELECT contact_id, dispatch_failures, dead_lettered_at IS NOT NULL AS dead, processed_at IS NOT NULL AS processed
+         FROM inbound_events ORDER BY id`,
+      );
+      expect(rows).toEqual([
+        { contact_id: 'poison', dispatch_failures: 5, dead: true, processed: true },
+        { contact_id: 'poison', dispatch_failures: 5, dead: true, processed: true },
+        { contact_id: 'alice', dispatch_failures: 0, dead: false, processed: true },
+      ]);
+    } finally {
+      await dropPoison();
     }
   });
 });
@@ -234,27 +291,51 @@ describe('failures and retries', () => {
     await h.comment('alice', 'pricing');
     await h.dispatcher.tick();
 
-    let failed = false;
-    const flaky = new Proxy(h.db, {
-      get(target, prop, receiver) {
-        if (prop !== 'query') return Reflect.get(target, prop, receiver);
-        return (...args: unknown[]) => {
-          if (!failed && String(args[0]).includes('max(received_at)')) {
-            failed = true;
-            return Promise.reject(new Error('Connection terminated unexpectedly'));
-          }
-          return (target.query as (...a: unknown[]) => unknown)(...args);
-        };
-      },
-    }) as Db;
-    await new Worker({ db: flaky, clock: h.clock, client: h.client }, { random: () => 1 }).tick();
-    expect(failed).toBe(true);
+    const flaky = flakyDb(h.db, (sql) => sql.includes('max(received_at)'), 1);
+    await new Worker({ db: flaky.db, clock: h.clock, client: h.client }, { random: () => 1 }).tick();
+    expect(flaky.state.failures).toBe(1);
     expect((await h.runs())[0]).toMatchObject({ status: 'running', error: null });
 
     h.clock.advance(2_000);
     await h.drain();
     expect((await h.runs())[0].status).toBe('completed');
     expect(h.dmTexts()).toEqual(['Hi!']);
+  });
+
+  it('retries a step whose run update hit a dropped connection after the send, without sending again', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.dispatcher.tick();
+
+    const flaky = flakyDb(h.db, (sql) => sql.includes('SET current_step'), 1);
+    await new Worker({ db: flaky.db, clock: h.clock, client: h.client }, { random: () => 1 }).tick();
+    expect(flaky.state.failures).toBe(1);
+    expect((await h.runs())[0]).toMatchObject({ status: 'running', current_step: 0, failures: 1, error: null });
+
+    h.clock.advance(2_000);
+    await h.drain();
+    expect((await h.runs())[0].status).toBe('completed');
+    expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply', 'dm']);
+  });
+
+  it('gives up on a database error that keeps failing before any send', async () => {
+    const retryPolicy = { maxAttempts: 3, baseDelayMs: 1_000, maxDelayMs: 1_000 };
+    await h.createAutomation(pricing, [{ type: 'send_dm', text: 'Hi!' }]);
+    await h.comment('alice', 'pricing');
+    await h.dispatcher.tick();
+
+    const flaky = flakyDb(h.db, (sql) => sql.includes('max(received_at)'));
+    const worker = new Worker({ db: flaky.db, clock: h.clock, client: h.client }, { retryPolicy, random: () => 1 });
+    for (let i = 0; i < 5; i++) {
+      await worker.tick();
+      h.clock.advance(1_000);
+    }
+    expect(flaky.state.failures).toBe(3);
+    expect((await h.runs())[0]).toMatchObject({
+      status: 'failed',
+      error: 'gave up after 3 attempts: Connection terminated unexpectedly',
+    });
+    expect(h.client.sent).toEqual([]);
   });
 
   it('times out a platform call that hangs, and retries it within the lease', async () => {
@@ -321,6 +402,46 @@ describe('leases', () => {
       { step_index: 0, attempt: 2, status: 'sent' },
       { step_index: 1, attempt: 1, status: 'sent' },
     ]);
+  });
+
+  it('treats a rejected duplicate private reply as delivered when an earlier attempt may have sent it', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+
+    const release = h.client.holdNext();
+    const staleTick = h.newWorker().tick(); // the private reply is delivered, then the worker stalls
+    await expect.poll(() => h.client.sent.length).toBe(2);
+    h.clock.advance(30_001);
+    await h.worker.tick();
+    release();
+    await staleTick;
+
+    const [run] = await h.runs();
+    expect(run).toMatchObject({ status: 'completed', error: null });
+    expect(run.context.private_reply_used).toBe(true);
+    expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply', 'dm']);
+    expect((await h.stepExecutions())[1]).toMatchObject({ attempt: 2, status: 'sent' });
+  });
+
+  it('remembers a private reply was used when a sent DM is replayed after the window opened', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.dispatcher.tick();
+    await h.worker.tick(); // reply to comment
+
+    const flaky = flakyDb(h.db, (sql) => sql.includes('SET current_step'), 1);
+    await new Worker({ db: flaky.db, clock: h.clock, client: h.client }, { random: () => 1 }).tick();
+    expect(flaky.state.failures).toBe(1);
+    await h.dm('alice', 'thanks!'); // opens the 24h window, so a fresh decision would be a standard DM
+    h.clock.advance(2_000);
+    await h.drain();
+
+    const [run] = await h.runs();
+    expect(run.status).toBe('completed');
+    expect(run.context.private_reply_used).toBe(true);
+    expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply', 'dm']);
   });
 
   it('never runs a step twice when several workers claim in parallel', async () => {

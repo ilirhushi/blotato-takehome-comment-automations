@@ -70,6 +70,27 @@ export async function markProcessed(q: Queryable, eventId: string, at: Date): Pr
   await q.query(`UPDATE inbound_events SET processed_at = $2 WHERE id = $1`, [eventId, at]);
 }
 
+/** Counts a failed dispatch. At maxFailures the event is dead-lettered. Returns true if it was. */
+export async function recordDispatchFailure(
+  q: Queryable,
+  eventId: string,
+  error: string,
+  maxFailures: number,
+  at: Date,
+): Promise<boolean> {
+  const { rows } = await q.query<{ dead: boolean }>(
+    `UPDATE inbound_events
+     SET dispatch_failures = dispatch_failures + 1,
+         last_dispatch_error = $2,
+         dead_lettered_at = CASE WHEN dispatch_failures + 1 >= $3 THEN $4::timestamptz END,
+         processed_at = CASE WHEN dispatch_failures + 1 >= $3 THEN $4::timestamptz END
+     WHERE id = $1
+     RETURNING dead_lettered_at IS NOT NULL AS dead`,
+    [eventId, error, maxFailures, at],
+  );
+  return rows[0]?.dead ?? false;
+}
+
 export async function lastDmAt(q: Queryable, contact: ContactKey): Promise<Date | null> {
   const { rows } = await q.query<{ at: Date | null }>(
     `SELECT max(received_at) AS at FROM inbound_events
@@ -84,7 +105,7 @@ export async function unconsumedDmsSince(q: Queryable, contact: ContactKey, sinc
   const { rows } = await q.query<EventRow>(
     `SELECT ${COLUMNS} FROM inbound_events
      WHERE account_id = $1 AND platform = $2 AND contact_id = $3
-       AND kind = 'dm' AND consumed_by_run_id IS NULL AND received_at >= $4
+       AND kind = 'dm' AND consumed_by_run_id IS NULL AND dead_lettered_at IS NULL AND received_at >= $4
      ORDER BY id`,
     [contact.accountId, contact.platform, contact.contactId, since],
   );

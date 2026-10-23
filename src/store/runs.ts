@@ -16,6 +16,7 @@ interface RunRow {
   wake_at: Date | null;
   waiting_since: Date | null;
   lease_until: Date | null;
+  failures: number;
   error: string | null;
 }
 
@@ -31,6 +32,7 @@ const toRun = (r: RunRow): Run => ({
   wakeAt: r.wake_at,
   waitingSince: r.waiting_since,
   leaseUntil: r.lease_until,
+  failures: r.failures,
   error: r.error,
 });
 
@@ -112,14 +114,14 @@ export function applyIfLeaseHeld(q: Queryable, lease: Lease, update: RunUpdate, 
   return updateIfLeaseHeld(
     q,
     lease,
-    `current_step = $3, status = $4, context = $5, wake_at = $6, waiting_since = $7`,
+    `current_step = $3, status = $4, context = $5, wake_at = $6, waiting_since = $7, failures = 0`,
     [update.currentStep, update.status, JSON.stringify(update.context), update.wakeAt, update.waitingSince],
     now,
   );
 }
 
 export function rescheduleIfLeaseHeld(q: Queryable, lease: Lease, wakeAt: Date, now: Date): Promise<boolean> {
-  return updateIfLeaseHeld(q, lease, `wake_at = $3`, [wakeAt], now);
+  return updateIfLeaseHeld(q, lease, `wake_at = $3, failures = failures + 1`, [wakeAt], now);
 }
 
 export function failIfLeaseHeld(q: Queryable, lease: Lease, reason: string, now: Date): Promise<boolean> {

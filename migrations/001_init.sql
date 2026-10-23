@@ -29,6 +29,7 @@ CREATE TRIGGER automation_versions_immutable
 
 -- processed_at means "routed"; consumed_by_run_id means "a run took this DM as
 -- its reply". They differ when a DM arrives before its run reaches the wait step.
+-- An event that keeps failing dispatch is dead-lettered: processed, but never used.
 CREATE TABLE inbound_events (
   id                 bigserial PRIMARY KEY,
   platform           text NOT NULL,
@@ -40,6 +41,9 @@ CREATE TABLE inbound_events (
   received_at        timestamptz NOT NULL,
   processed_at       timestamptz,
   consumed_by_run_id uuid,
+  dispatch_failures  int NOT NULL DEFAULT 0,
+  last_dispatch_error text,
+  dead_lettered_at   timestamptz,
   UNIQUE (platform, platform_event_id)
 );
 CREATE INDEX inbound_events_unprocessed ON inbound_events (id) WHERE processed_at IS NULL;
@@ -48,7 +52,7 @@ CREATE INDEX inbound_events_contact_dms
   WHERE kind = 'dm';
 
 -- wake_at depends on status:
---   status = running: do not run before this time (retry backoff, rate limit)
+--   status = running: do not run before this time (retry backoff)
 --   status = waiting: the reply deadline; the scheduler expires the run after it
 CREATE TABLE runs (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,6 +69,7 @@ CREATE TABLE runs (
   wake_at               timestamptz,
   waiting_since         timestamptz,
   lease_until           timestamptz,
+  failures              int NOT NULL DEFAULT 0, -- failed tries of the current step
   error                 text,
   created_at            timestamptz NOT NULL DEFAULT now(),
   updated_at            timestamptz NOT NULL DEFAULT now(),
@@ -83,6 +88,8 @@ CREATE TABLE step_executions (
   step_index          int NOT NULL,
   effect_key          text NOT NULL DEFAULT 'main',
   attempt             int NOT NULL DEFAULT 1,
+  attempted_at        timestamptz NOT NULL DEFAULT now(), -- when the latest attempt started
+  channel             text NOT NULL CHECK (channel IN ('comment_reply', 'dm', 'private_reply')),
   status              text NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
   external_message_id text,
   error               text,

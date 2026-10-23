@@ -3,7 +3,7 @@ import { canAnswer, resumeWithReply } from '../core/conversation.js';
 import type { InboundDm, InboundEvent } from '../core/inbound.js';
 import { planRunsForComment } from '../core/planner.js';
 import type { ContactKey } from '../core/types.js';
-import { withTransaction, type Db, type Tx } from '../db/pool.js';
+import { withSavepoint, withTransaction, type Db, type Tx } from '../db/pool.js';
 import * as automations from '../store/automations.js';
 import * as events from '../store/events.js';
 import { tryLockContact } from '../store/locks.js';
@@ -16,12 +16,15 @@ import * as runs from '../store/runs.js';
  */
 export interface DispatcherOptions {
   batchSize?: number;
-  /** Called when one contact's events fail. They stay unprocessed and are retried on a later tick. */
+  /** An event is dead-lettered after this many failed dispatches. */
+  maxFailures?: number;
+  /** Called when an event fails. It is retried on a later tick until dead-lettered. */
   onError?: (err: unknown, contact: ContactKey) => void;
 }
 
 export class EventDispatcher {
   private readonly batchSize: number;
+  private readonly maxFailures: number;
   private readonly onError: (err: unknown, contact: ContactKey) => void;
 
   constructor(
@@ -29,6 +32,7 @@ export class EventDispatcher {
     opts: DispatcherOptions = {},
   ) {
     this.batchSize = opts.batchSize ?? 20;
+    this.maxFailures = opts.maxFailures ?? 5;
     this.onError = opts.onError ?? ((err, contact) => console.error('dispatch failed for', contact, err));
   }
 
@@ -48,14 +52,29 @@ export class EventDispatcher {
     return processed;
   }
 
+  /**
+   * A failing event stops the contact's batch, so later events never overtake it.
+   * Once dead-lettered it no longer blocks them.
+   */
   private async dispatchContact(tx: Tx, contact: ContactKey): Promise<number> {
     const pending = await events.pendingEventsForContact(tx, contact);
+    let processed = 0;
     for (const event of pending) {
-      if (event.kind === 'comment') await this.onComment(tx, event);
-      else await this.onDm(tx, event);
-      await events.markProcessed(tx, event.id, this.deps.clock.now());
+      try {
+        await withSavepoint(tx, async () => {
+          if (event.kind === 'comment') await this.onComment(tx, event);
+          else await this.onDm(tx, event);
+          await events.markProcessed(tx, event.id, this.deps.clock.now());
+        });
+      } catch (err) {
+        this.onError(err, contact);
+        const message = err instanceof Error ? err.message : String(err);
+        const dead = await events.recordDispatchFailure(tx, event.id, message, this.maxFailures, this.deps.clock.now());
+        if (!dead) break;
+      }
+      processed++;
     }
-    return pending.length;
+    return processed;
   }
 
   /**

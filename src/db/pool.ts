@@ -27,3 +27,16 @@ export async function withTransaction<T>(db: Db, fn: (tx: Tx) => Promise<T>): Pr
     tx.release();
   }
 }
+
+/** Runs fn inside a savepoint, so its failure leaves the surrounding transaction usable. */
+export async function withSavepoint<T>(tx: Tx, fn: () => Promise<T>): Promise<T> {
+  await tx.query('SAVEPOINT sp');
+  try {
+    const result = await fn();
+    await tx.query('RELEASE SAVEPOINT sp');
+    return result;
+  } catch (err) {
+    await tx.query('ROLLBACK TO SAVEPOINT sp');
+    throw err;
+  }
+}

@@ -37,6 +37,8 @@ export interface Run {
   wakeAt: Date | null;
   waitingSince: Date | null;
   leaseUntil: Date | null;
+  /** Failed tries of the current step so far. Reset when the step completes. */
+  failures: number;
   error: string | null;
 }
 
