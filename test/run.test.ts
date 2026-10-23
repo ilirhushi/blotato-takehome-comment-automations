@@ -1,14 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { advance, onStepFailure, type RunContext } from '../src/core/run.js';
+import { advance, complete, onStepFailure, stay, type RunContext } from '../src/core/run.js';
 
 const now = new Date('2026-01-01T00:00:00Z');
 const context: RunContext = { vars: {}, comment: { id: 'c', post_id: 'p', created_at: now.toISOString() } };
 const policy = { maxAttempts: 3, baseDelayMs: 1_000, maxDelayMs: 3_000 };
 
-describe('advance', () => {
-  it('keeps the run going until the last step', () => {
-    expect(advance({ currentStep: 0 }, 2, context, now)).toEqual({ status: 'running', context, wakeAt: now });
-    expect(advance({ currentStep: 1 }, 2, context, now)).toEqual({ status: 'completed', context, wakeAt: null });
+describe('step transitions', () => {
+  it('advances until the last step, then completes', () => {
+    expect(advance({ currentStep: 0 }, 2, context, now)).toEqual({
+      currentStep: 1,
+      status: 'running',
+      context,
+      wakeAt: now,
+      waitingSince: null,
+    });
+    expect(advance({ currentStep: 1 }, 2, context, now)).toMatchObject({ currentStep: 2, status: 'completed', wakeAt: null });
+  });
+
+  it('clears wait state when leaving a step', () => {
+    const waiting = { ...context, wait: { since: now.toISOString(), reprompts: 1 } };
+    expect(advance({ currentStep: 0 }, 2, waiting, now).context).toEqual(context);
+    expect(complete({ currentStep: 0 }, waiting).context).toEqual(context);
+  });
+
+  it('stays on the same step', () => {
+    expect(stay({ currentStep: 3 }, context, now)).toMatchObject({ currentStep: 3, status: 'running', wakeAt: now });
   });
 });
 

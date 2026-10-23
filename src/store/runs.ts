@@ -1,4 +1,4 @@
-import type { Advance, Lease, Run, RunContext, RunStatus } from '../core/run.js';
+import type { Lease, Run, RunContext, RunStatus, RunUpdate } from '../core/run.js';
 import type { ContactKey, Platform } from '../core/types.js';
 import type { Queryable } from '../db/pool.js';
 
@@ -108,12 +108,12 @@ async function updateIfLeaseHeld(q: Queryable, lease: Lease, set: string, params
   return (rowCount ?? 0) > 0;
 }
 
-export function advanceIfLeaseHeld(q: Queryable, lease: Lease, next: Advance, now: Date): Promise<boolean> {
+export function applyIfLeaseHeld(q: Queryable, lease: Lease, update: RunUpdate, now: Date): Promise<boolean> {
   return updateIfLeaseHeld(
     q,
     lease,
-    `current_step = current_step + 1, status = $3, context = $4, wake_at = $5`,
-    [next.status, JSON.stringify(next.context), next.wakeAt],
+    `current_step = $3, status = $4, context = $5, wake_at = $6, waiting_since = $7`,
+    [update.currentStep, update.status, JSON.stringify(update.context), update.wakeAt, update.waitingSince],
     now,
   );
 }
@@ -124,4 +124,32 @@ export function rescheduleIfLeaseHeld(q: Queryable, lease: Lease, wakeAt: Date, 
 
 export function failIfLeaseHeld(q: Queryable, lease: Lease, reason: string, now: Date): Promise<boolean> {
   return updateIfLeaseHeld(q, lease, `status = 'failed', error = $3, wake_at = NULL`, [reason], now);
+}
+
+export async function findWaiting(q: Queryable, contact: ContactKey): Promise<Run | null> {
+  const { rows } = await q.query<RunRow>(
+    `SELECT * FROM runs
+     WHERE account_id = $1 AND platform = $2 AND contact_id = $3 AND status = 'waiting'`,
+    [contact.accountId, contact.platform, contact.contactId],
+  );
+  return rows[0] ? toRun(rows[0]) : null;
+}
+
+/** Applies the update only if the run is still waiting, so it cannot race with expiry. */
+export async function resumeIfWaiting(q: Queryable, runId: string, update: RunUpdate, now: Date): Promise<boolean> {
+  const { rowCount } = await q.query(
+    `UPDATE runs SET status = $2, context = $3, wake_at = $4, waiting_since = $5, updated_at = $6
+     WHERE id = $1 AND status = 'waiting'`,
+    [runId, update.status, JSON.stringify(update.context), update.wakeAt, update.waitingSince, now],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function expireDue(q: Queryable, now: Date): Promise<number> {
+  const { rowCount } = await q.query(
+    `UPDATE runs SET status = 'expired', wake_at = NULL, updated_at = $1
+     WHERE status = 'waiting' AND wake_at <= $1`,
+    [now],
+  );
+  return rowCount ?? 0;
 }

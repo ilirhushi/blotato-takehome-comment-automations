@@ -1,5 +1,6 @@
 import type { Clock } from '../clock.js';
-import type { Lease, Run, RunContext } from '../core/run.js';
+import type { Lease, Run, RunContext, WaitState } from '../core/run.js';
+import type { WaitForReplyStep } from '../core/types.js';
 import type { Db } from '../db/pool.js';
 import type { PlatformAdapter, PlatformClient, SendResult } from '../platform/types.js';
 import * as events from '../store/events.js';
@@ -12,7 +13,11 @@ export interface EngineDeps {
   client: PlatformClient;
 }
 
-export type StepResult = { type: 'advance'; context?: RunContext };
+export type StepResult =
+  | { type: 'advance'; context?: RunContext }
+  | { type: 'stay'; context: RunContext }
+  | { type: 'complete'; context: RunContext }
+  | { type: 'wait'; step: WaitForReplyStep; wait: WaitState };
 
 export class StepContext {
   /** Attempt number of the most recent send; the worker uses it to decide on retries. */
@@ -35,6 +40,10 @@ export class StepContext {
 
   lastInboundDmAt(): Promise<Date | null> {
     return events.lastDmAt(this.deps.db, this.run.contact);
+  }
+
+  latestSentAt(): Promise<Date | null> {
+    return stepExecutions.latestSentAt(this.deps.db, this.run.id);
   }
 
   /**

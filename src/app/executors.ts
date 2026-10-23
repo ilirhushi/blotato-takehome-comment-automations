@@ -1,3 +1,4 @@
+import { acceptReply, afterGiveUp, afterReprompt, decideOnReply } from '../core/conversation.js';
 import type { RunContext } from '../core/run.js';
 import { renderTemplate } from '../core/template.js';
 import type { Step, StepType } from '../core/types.js';
@@ -44,8 +45,28 @@ const executors: { [T in StepType]: StepExecutor<Extract<Step, { type: T }>> } =
     return { type: 'advance', context };
   },
 
-  async wait_for_reply() {
-    throw new PermanentStepError('wait_for_reply is not implemented yet');
+  async wait_for_reply(ctx, step) {
+    const { context } = ctx.run;
+    // The previous step is a send_dm, so the latest sent effect is the prompt.
+    const since = context.wait?.since ?? (await ctx.latestSentAt())?.toISOString();
+    if (!since) throw new PermanentStepError('wait_for_reply has no prompt to wait on');
+    const wait = context.wait ?? { since, reprompts: 0 };
+    if (!wait.reply) return { type: 'wait', step, wait };
+
+    const decision = decideOnReply(step, wait, wait.reply.text);
+    switch (decision.kind) {
+      case 'accept':
+        return { type: 'advance', context: acceptReply(context, step, decision.value) };
+      case 'reprompt': {
+        const text = renderTemplate(step.reprompt_text, context.vars);
+        const sent = await sendDirectMessage(ctx, `reprompt:${decision.number}`, text);
+        return { type: 'stay', context: afterReprompt(sent, wait, decision.number) };
+      }
+      case 'give_up': {
+        const sent = await sendDirectMessage(ctx, 'give_up', renderTemplate(step.give_up_text, context.vars));
+        return { type: 'complete', context: afterGiveUp(sent) };
+      }
+    }
   },
 };
 

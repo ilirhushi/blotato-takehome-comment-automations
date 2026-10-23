@@ -26,4 +26,7 @@ export type InboundEvent = InboundEventData & {
   id: string;
   contact: ContactKey;
   receivedAt: Date;
+  consumedByRunId: string | null;
 };
+
+export type InboundDm = Extract<InboundEvent, { kind: 'dm' }>;

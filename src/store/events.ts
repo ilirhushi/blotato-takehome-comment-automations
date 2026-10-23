@@ -1,4 +1,4 @@
-import type { InboundEvent, NewInboundEvent } from '../core/inbound.js';
+import type { InboundDm, InboundEvent, NewInboundEvent } from '../core/inbound.js';
 import type { ContactKey, Platform } from '../core/types.js';
 import type { Queryable } from '../db/pool.js';
 
@@ -10,7 +10,10 @@ interface EventRow {
   kind: 'comment' | 'dm';
   payload: never;
   received_at: Date;
+  consumed_by_run_id: string | null;
 }
+
+const COLUMNS = 'id, account_id, platform, contact_id, kind, payload, received_at, consumed_by_run_id';
 
 const toEvent = (r: EventRow): InboundEvent => ({
   id: r.id,
@@ -18,6 +21,7 @@ const toEvent = (r: EventRow): InboundEvent => ({
   kind: r.kind,
   payload: r.payload,
   receivedAt: r.received_at,
+  consumedByRunId: r.consumed_by_run_id,
 });
 
 /** Returns the new event id, or null if the event was already stored. */
@@ -54,7 +58,7 @@ export async function contactsWithPendingEvents(q: Queryable, limit: number): Pr
 
 export async function pendingEventsForContact(q: Queryable, contact: ContactKey): Promise<InboundEvent[]> {
   const { rows } = await q.query<EventRow>(
-    `SELECT id, account_id, platform, contact_id, kind, payload, received_at FROM inbound_events
+    `SELECT ${COLUMNS} FROM inbound_events
      WHERE account_id = $1 AND platform = $2 AND contact_id = $3 AND processed_at IS NULL
      ORDER BY id`,
     [contact.accountId, contact.platform, contact.contactId],
@@ -73,4 +77,21 @@ export async function lastDmAt(q: Queryable, contact: ContactKey): Promise<Date 
     [contact.accountId, contact.platform, contact.contactId],
   );
   return rows[0]?.at ?? null;
+}
+
+/** The oldest DM from the contact, received at or after since, that no run has consumed yet. */
+export async function oldestUnconsumedDmSince(q: Queryable, contact: ContactKey, since: Date): Promise<InboundDm | null> {
+  const { rows } = await q.query<EventRow>(
+    `SELECT ${COLUMNS} FROM inbound_events
+     WHERE account_id = $1 AND platform = $2 AND contact_id = $3
+       AND kind = 'dm' AND consumed_by_run_id IS NULL AND received_at >= $4
+     ORDER BY id
+     LIMIT 1`,
+    [contact.accountId, contact.platform, contact.contactId, since],
+  );
+  return rows[0] ? (toEvent(rows[0]) as InboundDm) : null;
+}
+
+export async function markConsumed(q: Queryable, eventId: string, runId: string): Promise<void> {
+  await q.query(`UPDATE inbound_events SET consumed_by_run_id = $2 WHERE id = $1`, [eventId, runId]);
 }

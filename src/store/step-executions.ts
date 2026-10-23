@@ -48,3 +48,12 @@ export async function markFailed(q: Queryable, key: EffectKey, attempt: number, 
     [...keyParams(key), attempt, error, now],
   );
 }
+
+/** When the run's most recent successful side effect was first attempted. */
+export async function latestSentAt(q: Queryable, runId: string): Promise<Date | null> {
+  const { rows } = await q.query<{ at: Date | null }>(
+    `SELECT max(created_at) AS at FROM step_executions WHERE run_id = $1 AND status = 'sent'`,
+    [runId],
+  );
+  return rows[0]?.at ?? null;
+}

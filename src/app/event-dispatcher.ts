@@ -1,5 +1,6 @@
 import type { Clock } from '../clock.js';
-import type { InboundEvent } from '../core/inbound.js';
+import { canAnswer, resumeWithReply } from '../core/conversation.js';
+import type { InboundDm, InboundEvent } from '../core/inbound.js';
 import { planRunsForComment } from '../core/planner.js';
 import type { ContactKey } from '../core/types.js';
 import { withTransaction, type Db, type Tx } from '../db/pool.js';
@@ -35,11 +36,23 @@ export class EventDispatcher {
     const pending = await events.pendingEventsForContact(tx, contact);
     for (const event of pending) {
       if (event.kind === 'comment') await this.onComment(tx, event);
-      // A DM nobody is waiting for stays available: a run that reaches its wait
-      // step later checks for replies that arrived early.
+      else await this.onDm(tx, event);
       await events.markProcessed(tx, event.id, this.deps.clock.now());
     }
     return pending.length;
+  }
+
+  /**
+   * Resumes the contact's waiting run with this DM. A DM nobody is waiting for
+   * stays unconsumed: a run that reaches its wait step later checks for it.
+   */
+  private async onDm(tx: Tx, dm: InboundDm): Promise<void> {
+    if (dm.consumedByRunId) return;
+    const run = await runs.findWaiting(tx, dm.contact);
+    if (!run || !canAnswer(run, dm.receivedAt)) return;
+    const now = this.deps.clock.now();
+    const update = resumeWithReply(run, run.context.wait, { eventId: dm.id, text: dm.payload.text }, now);
+    if (await runs.resumeIfWaiting(tx, run.id, update, now)) await events.markConsumed(tx, dm.id, run.id);
   }
 
   private async onComment(tx: Tx, event: Extract<InboundEvent, { kind: 'comment' }>): Promise<void> {

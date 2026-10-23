@@ -9,6 +9,20 @@ export interface RunContext {
   comment: { id: string; post_id: string; created_at: string };
   private_reply_used?: boolean;
   outcome?: string;
+  wait?: WaitState;
+}
+
+export interface Reply {
+  eventId: string;
+  text: string;
+}
+
+/** State of the current wait_for_reply step. Cleared when the run leaves it. */
+export interface WaitState {
+  /** Only DMs received at or after this ISO time can answer the wait. */
+  since: string;
+  reprompts: number;
+  reply?: Reply;
 }
 
 export interface Run {
@@ -39,15 +53,34 @@ export function initialContext(comment: CommentPayload): RunContext {
   };
 }
 
-export interface Advance {
-  status: 'running' | 'completed';
+/** The new state of a run after a step, applied only while the worker still holds the lease. */
+export interface RunUpdate {
+  currentStep: number;
+  status: RunStatus;
   context: RunContext;
   wakeAt: Date | null;
+  waitingSince: Date | null;
 }
 
-export function advance(run: Pick<Run, 'currentStep'>, stepCount: number, context: RunContext, now: Date): Advance {
-  const isLast = run.currentStep + 1 >= stepCount;
-  return isLast ? { status: 'completed', context, wakeAt: null } : { status: 'running', context, wakeAt: now };
+type RunPosition = Pick<Run, 'currentStep'>;
+
+export function advance(run: RunPosition, stepCount: number, context: RunContext, now: Date): RunUpdate {
+  const next = run.currentStep + 1;
+  const { wait: _, ...rest } = context;
+  return next >= stepCount
+    ? { currentStep: next, status: 'completed', context: rest, wakeAt: null, waitingSince: null }
+    : { currentStep: next, status: 'running', context: rest, wakeAt: now, waitingSince: null };
+}
+
+/** Runs the same step again on the next tick. */
+export function stay(run: RunPosition, context: RunContext, now: Date): RunUpdate {
+  return { currentStep: run.currentStep, status: 'running', context, wakeAt: now, waitingSince: null };
+}
+
+/** Ends the run without executing the remaining steps. */
+export function complete(run: RunPosition, context: RunContext): RunUpdate {
+  const { wait: _, ...rest } = context;
+  return { currentStep: run.currentStep, status: 'completed', context: rest, wakeAt: null, waitingSince: null };
 }
 
 export type FailureDecision = { kind: 'retry'; wakeAt: Date } | { kind: 'fail'; reason: string };

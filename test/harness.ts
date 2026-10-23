@@ -2,6 +2,7 @@ import { FakeClock } from '../src/clock.js';
 import { createAutomation } from '../src/app/automations.js';
 import { EventDispatcher } from '../src/app/event-dispatcher.js';
 import { ingestEvent } from '../src/app/ingest.js';
+import { ExpiryScheduler } from '../src/app/scheduler.js';
 import { Worker, type WorkerOptions } from '../src/app/worker.js';
 import { MockPlatformClient } from '../src/platform/mock.js';
 import type { TestDb } from './helpers.js';
@@ -14,6 +15,7 @@ export function createHarness(t: TestDb, workerOpts: WorkerOptions = {}) {
   const client = new MockPlatformClient();
   const deps = { db, clock, client };
   const dispatcher = new EventDispatcher(deps);
+  const scheduler = new ExpiryScheduler(deps);
   const worker = new Worker(deps, { random: () => 1, ...workerOpts });
   let seq = 0;
 
@@ -22,6 +24,8 @@ export function createHarness(t: TestDb, workerOpts: WorkerOptions = {}) {
     clock,
     client,
     dispatcher,
+    scheduler,
+    newDispatcher: () => new EventDispatcher(deps),
     worker,
     newWorker: (opts: WorkerOptions = {}) => new Worker(deps, { random: () => 1, ...workerOpts, ...opts }),
 
@@ -71,6 +75,8 @@ export function createHarness(t: TestDb, workerOpts: WorkerOptions = {}) {
       );
       return rows;
     },
+
+    dmTexts: () => client.sent.filter((m) => m.kind === 'dm').map((m) => m.text),
 
     async stepExecutions() {
       const { rows } = await db.query(
