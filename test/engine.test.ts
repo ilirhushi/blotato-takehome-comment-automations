@@ -43,6 +43,33 @@ describe('dispatching comments', () => {
     expect(rows[0].processed_at).not.toBeNull();
   });
 
+  it('handles a duplicate comment webhook once', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    expect(await h.comment('alice', 'pricing', { commentId: 'c-dup' })).not.toBeNull();
+    expect(await h.comment('alice', 'pricing', { commentId: 'c-dup' })).toBeNull();
+    await h.drain();
+    expect(await h.runs()).toHaveLength(1);
+    expect(h.client.sent).toHaveLength(2);
+  });
+
+  it('starts one run when the same user comments twice before dispatch', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.comment('alice', 'pricing please');
+    await h.drain();
+    expect((await h.runs()).map((r) => r.status)).toEqual(['completed', 'skipped']);
+    expect(h.client.sent.map((m) => m.kind)).toEqual(['comment_reply', 'dm']);
+  });
+
+  it('starts a new run when the user comments again after the previous one finished', async () => {
+    await h.createAutomation(pricing, replyAndDm);
+    await h.comment('alice', 'pricing');
+    await h.drain();
+    await h.comment('alice', 'pricing again');
+    await h.drain();
+    expect((await h.runs()).map((r) => r.status)).toEqual(['completed', 'completed']);
+  });
+
   it('ignores comments that do not match', async () => {
     await h.createAutomation(pricing, replyAndDm);
     await h.comment('alice', 'repricing is wild');

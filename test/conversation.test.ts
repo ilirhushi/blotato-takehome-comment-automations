@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { publishVersion } from '../src/app/automations.js';
 import { TransientPlatformError } from '../src/platform/types.js';
+import { setEnabled } from '../src/store/automations.js';
 import { createTestDb, type TestDb } from './helpers.js';
 import { createHarness, type Harness } from './harness.js';
 
@@ -37,11 +39,12 @@ beforeEach(async () => {
 
 /** Comment, then drain until the run is waiting for the email. */
 async function startConversation(maxReprompts?: number) {
-  await h.createAutomation(pricing, steps(maxReprompts));
+  const created = await h.createAutomation(pricing, steps(maxReprompts));
   await h.comment('ana', 'pricing');
   await h.drain();
   expect((await h.runs())[0].status).toBe('waiting');
   h.clock.advance(MINUTE);
+  return created;
 }
 
 describe('wait_for_reply', () => {
@@ -158,14 +161,30 @@ describe('wait_for_reply', () => {
     ]);
   });
 
-  it('does not resume a run that expired before its DM was dispatched', async () => {
+  it('does not expire a run whose reply arrived in time but is not dispatched yet', async () => {
     await startConversation();
     await h.dm('ana', 'ana@example.com');
     h.clock.advance(60 * MINUTE);
-    await h.scheduler.tick();
+    expect(await h.scheduler.tick()).toBe(0);
     await h.drain();
-    expect((await h.runs())[0].status).toBe('expired');
-    expect(h.dmTexts()).toHaveLength(1);
+    expect((await h.runs())[0].status).toBe('completed');
+    expect(h.dmTexts().at(-1)).toBe(LINK);
+  });
+
+  it('still expires the run once an undispatched DM from before the prompt is dispatched', async () => {
+    await h.createAutomation(pricing, steps());
+    await h.comment('ana', 'pricing');
+    await h.drain();
+    // Simulate a DM sent before the prompt that the dispatcher has not reached yet.
+    await h.db.query(
+      `INSERT INTO inbound_events (platform, platform_event_id, account_id, contact_id, kind, payload, received_at)
+       VALUES ('instagram', 'm-early', 'acct-1', 'ana', 'dm', '{"message_id":"m-early","text":"hi"}', $1)`,
+      [new Date(h.clock.now().getTime() - MINUTE)],
+    );
+    h.clock.advance(60 * MINUTE);
+    expect(await h.scheduler.tick()).toBe(0);
+    await h.dispatcher.tick();
+    expect(await h.scheduler.tick()).toBe(1);
   });
 
   it('ignores a reply sent after the deadline even if the scheduler has not run yet', async () => {
@@ -190,5 +209,45 @@ describe('wait_for_reply', () => {
     expect(h.dmTexts().slice(1)).toEqual([REPROMPT]);
     expect((await h.runs())[0].status).toBe('waiting');
     expect(await h.stepExecutions()).toMatchObject([{}, {}, { effect_key: 'reprompt:1', attempt: 2, status: 'sent' }]);
+  });
+
+  it('handles a duplicate DM webhook once', async () => {
+    await startConversation();
+    expect(await h.dm('ana', 'ana@example.com', { messageId: 'm-dup' })).not.toBeNull();
+    expect(await h.dm('ana', 'ana@example.com', { messageId: 'm-dup' })).toBeNull();
+    await h.drain();
+    expect(h.dmTexts()).toEqual(['Hi user_ana! What is your email?', LINK]);
+  });
+
+  it('finishes an in-flight run on its pinned version after the automation is edited', async () => {
+    const { automationId, versionId } = await startConversation();
+    const edited = steps();
+    edited[3] = { type: 'send_dm', text: 'New link: https://example.com/v2' };
+    const newVersionId = await publishVersion(h.db, automationId, pricing, edited);
+
+    await h.dm('ana', 'ana@example.com');
+    await h.comment('ben', 'pricing');
+    await h.drain();
+    await h.dm('ben', 'ben@example.com');
+    await h.drain();
+
+    const runs = await h.runs();
+    expect(runs.map((r) => [r.contact_id, r.automation_version_id, r.status])).toEqual([
+      ['ana', versionId, 'completed'],
+      ['ben', newVersionId, 'completed'],
+    ]);
+    const lastDm = (contactId: string) =>
+      h.client.sent.filter((m) => m.kind === 'dm' && m.contactId === contactId).at(-1)?.text;
+    expect(lastDm('ana')).toBe(LINK);
+    expect(lastDm('ben')).toBe('New link: https://example.com/v2');
+  });
+
+  it('lets an in-flight run finish after the automation is disabled, but starts no new ones', async () => {
+    const { automationId } = await startConversation();
+    await setEnabled(h.db, automationId, false);
+    await h.comment('ben', 'pricing');
+    await h.dm('ana', 'ana@example.com');
+    await h.drain();
+    expect((await h.runs()).map((r) => [r.contact_id, r.status])).toEqual([['ana', 'completed']]);
   });
 });

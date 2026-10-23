@@ -145,10 +145,20 @@ export async function resumeIfWaiting(q: Queryable, runId: string, update: RunUp
   return (rowCount ?? 0) > 0;
 }
 
+/**
+ * Expires waiting runs past their deadline, except while the contact has a DM
+ * received before the deadline that the dispatcher has not handled yet: it may
+ * be the answer, and the dispatcher decides.
+ */
 export async function expireDue(q: Queryable, now: Date): Promise<number> {
   const { rowCount } = await q.query(
-    `UPDATE runs SET status = 'expired', wake_at = NULL, updated_at = $1
-     WHERE status = 'waiting' AND wake_at <= $1`,
+    `UPDATE runs r SET status = 'expired', wake_at = NULL, updated_at = $1
+     WHERE r.status = 'waiting' AND r.wake_at <= $1
+       AND NOT EXISTS (
+         SELECT 1 FROM inbound_events e
+         WHERE e.account_id = r.account_id AND e.platform = r.platform AND e.contact_id = r.contact_id
+           AND e.kind = 'dm' AND e.processed_at IS NULL AND e.received_at < r.wake_at
+       )`,
     [now],
   );
   return rowCount ?? 0;

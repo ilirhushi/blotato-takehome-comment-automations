@@ -159,7 +159,11 @@ stateDiagram-v2
 - Invalid, with re-prompts left: send `reprompt_text`, then wait again. Each re-prompt resets the deadline.
 - Invalid, no re-prompts left: send `give_up_text` and end the run as `completed` with `context.outcome = 'gave_up'`. It is not `failed`, because nothing broke, and `failed` should be safe to alert on.
 
-**Expiry.** A scheduler loop sets `status = 'expired'` on waiting runs past `wake_at`. Nothing is sent. The dispatcher also refuses DMs received after the deadline, so a lagging scheduler cannot let a late reply through.
+**Expiry.** A scheduler loop sets `status = 'expired'` on waiting runs past `wake_at`. Nothing is sent. The deadline is judged by when a DM was received, not when it was dispatched, in both directions:
+- The dispatcher refuses DMs received after the deadline, so a lagging scheduler cannot let a late reply through.
+- The scheduler does not expire a run while its contact has an undispatched DM received before the deadline, so a lagging dispatcher cannot lose a reply that was on time. Once that DM is dispatched, the run either resumes or, if the DM could not answer it, expires on the next tick.
+
+The remaining window is a DM whose insert has not committed when the scheduler runs, which is milliseconds wide at the moment of the deadline.
 
 **Validation support.** A `wait_for_reply` must directly follow a `send_dm` (enforced when the version is published), so there is always a prompt to anchor to.
 
@@ -204,13 +208,12 @@ stateDiagram-v2
 - **Core:** pure unit tests, no database.
 - **Engine behavior:** tests against real Postgres, one schema per test file so files run in parallel. Concurrency guarantees only exist in the real database, so they are not faked.
 - **Determinism:** tests drive the dispatcher, worker, and scheduler with explicit `tick()` calls and a fake clock. Concurrency tests still run several ticks in parallel.
-- **Failure-mode tests:** beyond the scenarios derived from the design, there are tests for what happens when something is late, interrupted, or doubled: a worker dying mid-send, a lagging scheduler, a re-prompt that fails transiently.
+- **Failure-mode tests:** beyond the scenarios derived from the design, there are tests for what happens when something is late, interrupted, or doubled: a worker dying mid-send, a lagging scheduler, a lagging dispatcher at the deadline, a re-prompt that fails transiently.
 
 ## Open items
 
-1. **Dispatcher lag at the deadline.** A DM received just before the deadline, but dispatched after the scheduler expired the run, is ignored. A test pins down this behavior. Possible fix: the scheduler skips contacts that still have undispatched DMs.
-2. **Unnecessary re-prompt on a burst.** "one sec" followed immediately by "a@b.com" produces a re-prompt before the email is accepted. Correct, but slightly awkward.
-3. **Anchor on retried prompts.** The anchor is when the prompt's first attempt was queued. If that attempt fails and a retry succeeds, a DM that arrived in between can count as the answer. A valid email is accepted, and anything else gets a re-prompt, so the effect is benign.
-4. **Several valid replies.** If two valid emails arrive together, the second stays unconsumed and is ignored. This is intended.
-5. **Intentionally deferred:** the rate limiter (decision 18).
-6. **Not yet built:** the webhook HTTP endpoint with payload normalization (including dropping echoes of our own messages and self-authored comments), and the process entrypoint. The implemented work should therefore be understood as the backend workflow engine, not a fully deployable webhook service.
+1. **Unnecessary re-prompt on a burst.** "one sec" followed immediately by "a@b.com" produces a re-prompt before the email is accepted. Correct, but slightly awkward.
+2. **Anchor on retried prompts.** The anchor is when the prompt's first attempt was queued. If that attempt fails and a retry succeeds, a DM that arrived in between can count as the answer. A valid email is accepted, and anything else gets a re-prompt, so the effect is benign.
+3. **Several valid replies.** If two valid emails arrive together, the second stays unconsumed and is ignored. This is intended.
+4. **Intentionally deferred:** the rate limiter (decision 18).
+5. **Not yet built:** the webhook HTTP endpoint with payload normalization (including dropping echoes of our own messages and self-authored comments), and the process entrypoint. The implemented work should therefore be understood as the backend workflow engine, not a fully deployable webhook service.

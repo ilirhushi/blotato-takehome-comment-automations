@@ -12,7 +12,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "pg": "^8.23.1"

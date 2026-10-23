@@ -45,6 +45,7 @@ npm run db:up       # start Postgres 16 on localhost:5433 and wait until healthy
 npm run migrate     # apply migrations/*.sql
 npm run typecheck
 npm test            # requires the database from db:up
+npm run demo        # seed the pricing automation and play a full conversation
 npm run db:down     # stop Postgres
 ```
 
@@ -58,4 +59,4 @@ npx vitest run -t "partial test name" # tests matching a name
 npm run test:watch                    # watch mode
 ```
 
-There is no server entrypoint. The webhook endpoint is out of scope (see ARCHITECTURE.md, open items), so the engine is exercised through the tests, which drive the dispatcher, worker, and scheduler directly.
+There is no server entrypoint. The webhook endpoint is out of scope (see ARCHITECTURE.md, open items), so the engine is exercised through the tests and the demo, which drive the dispatcher, worker, and scheduler directly. The demo uses its own `demo` schema, recreated on each run.
