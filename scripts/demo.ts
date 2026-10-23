@@ -8,6 +8,7 @@ import type { NewInboundEvent } from '../src/core/inbound.js';
 import { migrate } from '../src/db/migrate.js';
 import { createPool } from '../src/db/pool.js';
 import { MockPlatformClient } from '../src/platform/mock.js';
+import { pricingSteps, pricingTrigger } from './pricing-automation.js';
 
 const SCHEMA = 'demo';
 const contact = { accountId: 'acct-demo', platform: 'instagram', contactId: 'ana' } as const;
@@ -61,21 +62,8 @@ console.log('Seeding automation: comment "pricing" -> reply, ask for email, wait
 await createAutomation(db, {
   accountId: contact.accountId,
   platform: 'instagram',
-  trigger: { type: 'comment_keyword', keyword: 'pricing', post_ids: null },
-  steps: [
-    { type: 'reply_to_comment', text: 'Sent you a DM!' },
-    { type: 'send_dm', text: 'Hi {{username}}! What email should we send pricing to?' },
-    {
-      type: 'wait_for_reply',
-      validator: 'email',
-      save_as: 'email',
-      timeout_seconds: 24 * 60 * 60,
-      max_reprompts: 2,
-      reprompt_text: "Hmm, that doesn't look like an email. Could you double-check it?",
-      give_up_text: 'No worries! Comment "pricing" again any time.',
-    },
-    { type: 'send_dm', text: 'Thanks! Here is our pricing: https://example.com/pricing (copy sent to {{email}})' },
-  ],
+  trigger: pricingTrigger,
+  steps: pricingSteps,
 });
 
 await receive(

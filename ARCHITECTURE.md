@@ -2,7 +2,7 @@
 
 This document records the design decisions behind the comment automation backend, the alternatives considered, and what each decision costs. The README covers how to run the project.
 
-Implementation status: decisions 1–17 are implemented. Decision 18 (rate limiting) is intentionally deferred for this take-home; the proposed production approach is documented below. The open items at the end distinguish known behavioral tradeoffs from remaining implementation work.
+Implementation status: decisions 1–17 and 19 are implemented. Decision 18 (rate limiting) is intentionally deferred for this take-home; the proposed production approach is documented below. The open items at the end distinguish known behavioral tradeoffs from remaining implementation work.
 
 ---
 
@@ -67,7 +67,7 @@ Implementation status: decisions 1–17 are implemented. Decision 18 (rate limit
 
 ## 7. Event dispatch: one contact at a time, oldest event first
 
-**Decision.** The dispatcher finds contacts with unprocessed events and takes `pg_try_advisory_xact_lock` on each contact. If another dispatcher holds that contact, it moves on. The holder processes all of that contact's unprocessed events in `id` order, in one transaction.
+**Decision.** The dispatcher finds contacts with unprocessed events and takes `pg_try_advisory_xact_lock` on each contact. If another dispatcher holds that contact, it moves on. Advisory locks are database-wide, so the lock key includes the current schema: two schemas in one database (the parallel test files, or tenants split by schema) never contend for the same contact. The holder processes all of that contact's unprocessed events in `id` order, in one transaction.
 
 **Why not row locks with `SKIP LOCKED` here.** Two dispatchers would each lock one of a contact's events and then each wait for the contact lock the other holds: a deadlock. With the contact lock as the only mutual exclusion there is no lock ordering to get wrong, and a contact's events are never handled out of order or by two dispatchers at once.
 
@@ -217,6 +217,17 @@ The remaining window is a DM whose insert has not committed when the scheduler r
 
 **Placeholder limit.** Instagram: a burst of 20, then 1 per second.
 
+## 19. Running the engine
+
+**Decision.** `startEngine` (in `app/runner.ts`) runs the dispatcher, a configurable number of workers (4 by default), and the expiry scheduler as polling loops in one process. `src/main.ts` (`npm start`) wires it to a database pool and stops it on `SIGINT` or `SIGTERM`.
+- A loop goes straight to its next tick while there is work, and sleeps when idle (500 ms for the dispatcher and workers, 1 s for the scheduler). That poll interval bounds the latency of an idle system.
+- A tick that throws is reported and the loop carries on, so a database blip does not kill the process.
+- Stopping lets every loop finish its current tick. A step that is mid-send gets its result recorded instead of being abandoned to lease expiry and sent again. A tick is bounded by the platform call timeout (decision 10), so a shutdown grace period of about 15 s is enough.
+
+**Scaling.** Run more processes. Every loop coordinates through Postgres, so processes need nothing from each other. Each process holds at most one connection per loop at a time, which fits the default pool of 10. Extra dispatchers add little (open item 5).
+
+**Platform client.** There is no real Instagram client: the brief treats sending as an existing primitive. `main.ts` uses a placeholder that logs each send, which marks where the real client plugs in.
+
 ---
 
 ## Testing strategy
@@ -235,4 +246,4 @@ The remaining window is a DM whose insert has not committed when the scheduler r
 4. **Dead-lettered events have no tooling.** They are kept with their last error, but there is no alert, operator view, or replay.
 5. **Dispatcher scaling.** Every dispatcher reads the same oldest contacts, and the ones that lose the lock skip them, so extra dispatchers add little throughput. Partitioning contacts across dispatchers, or claiming contacts with `SKIP LOCKED` on a per-contact row, would fix this.
 6. **Intentionally deferred:** the rate limiter (decision 18).
-7. **Not yet built:** the webhook HTTP endpoint with payload normalization (including dropping echoes of our own messages and self-authored comments), and the process entrypoint. The implemented work should therefore be understood as the backend workflow engine, not a fully deployable webhook service.
+7. **Out of scope by design: the webhook endpoint and payload normalization.** The brief treats receiving comments and messages as an existing primitive. Our boundary with it is `ingestEvent`, which stores an already normalized event. Normalization would map the platform's payload to our event types, drop echoes of our own messages and the account's own comments, and carry the platform's timestamp (item 1). The engine checks for the account's own comments itself as well (decision 7).

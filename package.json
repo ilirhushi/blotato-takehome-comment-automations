@@ -10,10 +10,12 @@
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "migrate": "tsx src/db/migrate.ts",
+    "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
     "pg": "^8.23.1"

@@ -46,6 +46,9 @@ npm run migrate     # apply migrations/*.sql
 npm run typecheck
 npm test            # requires the database from db:up
 npm run demo        # seed the pricing automation and play a full conversation
+npm start           # run the engine (dispatcher, workers, scheduler) until Ctrl+C
+npm run seed        # in a second terminal: create the pricing automation if needed, then comment as "ana"
+npm run seed -- dm ana "ana@example.com"   # reply to the engine's DM
 npm run db:down     # stop Postgres
 ```
 
@@ -59,4 +62,4 @@ npx vitest run -t "partial test name" # tests matching a name
 npm run test:watch                    # watch mode
 ```
 
-There is no server entrypoint. The webhook endpoint is out of scope (see ARCHITECTURE.md, open items), so the engine is exercised through the tests and the demo, which drive the dispatcher, worker, and scheduler directly. The demo uses its own `demo` schema, recreated on each run.
+`npm start` runs the engine against the database from `db:up`, with a placeholder platform client that logs each send. Events enter through `ingestEvent`, which `npm run seed` calls in place of the platform's webhooks; the webhook endpoint is out of scope (see ARCHITECTURE.md, open items). The tests and the demo drive the dispatcher, worker, and scheduler directly with a fake clock. The demo uses its own `demo` schema, recreated on each run.

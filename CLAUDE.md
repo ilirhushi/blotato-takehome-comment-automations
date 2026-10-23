@@ -16,7 +16,7 @@ The deliverable is the design (architecture, data model, execution model, reliab
 
 `ARCHITECTURE.md` is the design record: numbered decisions, alternatives considered, costs, and open items. Read it before changing behavior, and keep it in sync when a decision changes.
 
-The platform already supports receiving comments and messages, replying to comments, and sending messages. Treat these as existing primitives behind `src/platform/` (a `PlatformClient` port with a mock). Don't design them. The webhook HTTP endpoint and process entrypoint are intentionally not built.
+The platform already supports receiving comments and messages, replying to comments, and sending messages. Treat these as existing primitives behind `src/platform/` (a `PlatformClient` port with a mock). Don't design them. The webhook HTTP endpoint is out of scope: events enter through `ingestEvent`. `src/main.ts` runs the engine with a placeholder client that logs sends.
 
 ## Commands
 
@@ -25,6 +25,8 @@ Tests run against a real Postgres (docker, host port 5433). `DATABASE_URL` overr
 ```sh
 npm run db:up                         # start Postgres and wait for health
 npm run migrate                       # apply migrations/*.sql
+npm start                             # run the engine loops until Ctrl+C
+npm run seed -- comment|dm [contact] [text]   # feed an event to the running engine
 npm run typecheck                     # tsc --noEmit
 npm test                              # vitest run (needs db:up)
 npx vitest run test/planner.test.ts   # one file
@@ -39,7 +41,7 @@ Functional core, imperative shell, with strict layering:
 
 - `src/core/`: pure domain logic (types, version validation, trigger matching, run transitions, the conversation state machine for `wait_for_reply`, the run planner, retry policy). No I/O, no imports outside `core/`.
 - `src/store/`: one module of plain query functions per table. Every function takes a `Queryable` (pool or transaction) so the caller owns the transaction. No business decisions here, but the concurrency SQL lives here under names stating its guarantee (`claimRunnable`, `applyIfLeaseHeld`, `resumeIfWaiting`).
-- `src/app/`: orchestration only (load, ask `core/`, persist, call the platform). No SQL. The three loops are `EventDispatcher` (inbound events to runs and resumes), `Worker` (claims a run with a lease, executes one step), and `ExpiryScheduler` (expires timed-out waits).
+- `src/app/`: orchestration only (load, ask `core/`, persist, call the platform). No SQL. The three loops are `EventDispatcher` (inbound events to runs and resumes), `Worker` (claims a run with a lease, executes one step), and `ExpiryScheduler` (expires timed-out waits). `startEngine` in `runner.ts` runs them as polling loops with graceful stop.
 - `src/platform/`: platform client port, Instagram DM-window rules (`canSendDm`, pure), mock client.
 
 Cross-cutting mechanics that span several files:
