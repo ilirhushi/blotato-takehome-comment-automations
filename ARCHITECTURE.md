@@ -203,7 +203,7 @@ The remaining window is a DM whose insert has not committed when the scheduler r
 
 ## 18. Rate limiting (deferred)
 
-**Decision.** A per-account token bucket stored in Postgres (`rate_limit_buckets`), updated atomically with `UPDATE ... RETURNING`, and shared by all workers. When no token is available, the run is rescheduled with `wake_at` at the time the next token is due. This does not count as a failed attempt.
+**Decision.** A per-account token bucket stored in Postgres, in a `rate_limit_buckets` table keyed by `(account_id, platform)` with `tokens` and `refilled_at` columns, updated atomically with `UPDATE ... RETURNING`, and shared by all workers. When no token is available, the run is rescheduled with `wake_at` at the time the next token is due. This does not count as a failed attempt.
 
 **Why deferred.** Rate limiting matters in production, particularly when calling external APIs, but implementing a distributed token bucket would add complexity beyond the core take-home requirements. I prioritized durable workflow execution, concurrency safety, idempotency, and recovery from failures. The proposed mechanism fits the existing Postgres-backed execution model and can be introduced later without redesigning it.
 

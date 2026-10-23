@@ -90,11 +90,3 @@ CREATE TABLE step_executions (
   updated_at          timestamptz NOT NULL DEFAULT now(),
   UNIQUE (run_id, step_index, effect_key)
 );
-
-CREATE TABLE rate_limit_buckets (
-  account_id  text NOT NULL,
-  platform    text NOT NULL,
-  tokens      double precision NOT NULL,
-  refilled_at timestamptz NOT NULL,
-  PRIMARY KEY (account_id, platform)
-);

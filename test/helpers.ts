@@ -22,7 +22,7 @@ export async function createTestDb(): Promise<TestDb> {
     async truncate() {
       await db.query(
         `TRUNCATE automations, automation_versions, inbound_events, runs,
-                  step_executions, rate_limit_buckets RESTART IDENTITY CASCADE`,
+                  step_executions RESTART IDENTITY CASCADE`,
       );
     },
     async close() {
