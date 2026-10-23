@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateReply } from '../src/engine/validators.js';
+import { validateReply } from '../src/core/reply-validators.js';
 
 describe('email validator', () => {
   it.each([

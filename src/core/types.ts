@@ -33,3 +33,9 @@ export type StepType = Step['type'];
 
 // Variables every comment trigger puts into the run context for templating.
 export const TRIGGER_VARS = ['username', 'comment_text'] as const;
+
+export interface ContactKey {
+  accountId: string;
+  platform: Platform;
+  contactId: string;
+}

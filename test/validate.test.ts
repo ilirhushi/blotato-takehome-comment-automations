@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateVersion, VersionValidationError } from '../src/domain/validate.js';
+import { validateVersion, VersionValidationError } from '../src/core/validate.js';
 
 const trigger = { type: 'comment_keyword', keyword: 'pricing', post_ids: null };
 const wait = {
@@ -21,7 +21,7 @@ const pricingSteps = [
 function issuesOf(fn: () => unknown): string[] {
   try {
     fn();
-  } catch (err) {
+  } catch (err: unknown) {
     if (err instanceof VersionValidationError) return err.issues;
     throw err;
   }

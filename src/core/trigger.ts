@@ -1,4 +1,4 @@
-import type { Trigger } from '../domain/types.js';
+import type { Trigger } from './types.js';
 
 export interface CommentFacts {
   post_id: string;

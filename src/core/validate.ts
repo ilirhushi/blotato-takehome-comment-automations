@@ -1,5 +1,5 @@
-import { getStepDefinition } from '../engine/steps/registry.js';
-import { templateVars } from '../engine/template.js';
+import { getStepDefinition } from './steps.js';
+import { templateVars } from './template.js';
 import { TRIGGER_VARS, type Step, type Trigger } from './types.js';
 
 export class VersionValidationError extends Error {

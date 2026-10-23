@@ -1,4 +1,4 @@
-import type { Platform } from '../domain/types.js';
+import type { Platform } from '../core/types.js';
 
 export class TransientPlatformError extends Error {
   readonly transient = true;

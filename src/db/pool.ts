@@ -2,6 +2,7 @@ import pg from 'pg';
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
+export type Queryable = Db | Tx;
 
 export const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5433/automations';
 

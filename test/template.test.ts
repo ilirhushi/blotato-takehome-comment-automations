@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderTemplate, templateVars } from '../src/engine/template.js';
+import { renderTemplate, templateVars } from '../src/core/template.js';
 
 describe('templates', () => {
   it('lists and renders variables', () => {

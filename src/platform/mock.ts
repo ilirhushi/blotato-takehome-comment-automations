@@ -14,6 +14,7 @@ export type SentMessage =
 export class MockPlatformClient implements PlatformClient {
   readonly sent: SentMessage[] = [];
   private failures: PlatformError[] = [];
+  private holds: Promise<void>[] = [];
   private nextId = 1;
 
   /** The next calls fail with these errors, in order, without sending anything. */
@@ -21,10 +22,21 @@ export class MockPlatformClient implements PlatformClient {
     this.failures.push(...errors);
   }
 
+  /**
+   * The next call is delivered but does not return until release() is called,
+   * which simulates a worker that stalls or dies after the platform accepted it.
+   */
+  holdNext(): () => void {
+    let release!: () => void;
+    this.holds.push(new Promise((resolve) => (release = resolve)));
+    return release;
+  }
+
   async replyToComment(input: { accountId: string; commentId: string; text: string }): Promise<SendResult> {
     this.throwIfFailing();
     const messageId = this.newId();
     this.sent.push({ kind: 'comment_reply', messageId, ...input });
+    await this.holds.shift();
     return { messageId };
   }
 
@@ -37,6 +49,7 @@ export class MockPlatformClient implements PlatformClient {
     this.throwIfFailing();
     const messageId = this.newId();
     this.sent.push({ kind: 'dm', messageId, ...input });
+    await this.holds.shift();
     return { messageId };
   }
 

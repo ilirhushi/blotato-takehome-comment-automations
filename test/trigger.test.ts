@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchesKeyword, triggerMatches } from '../src/routing/match.js';
+import { matchesKeyword, triggerMatches } from '../src/core/trigger.js';
 
 describe('matchesKeyword', () => {
   it.each([
