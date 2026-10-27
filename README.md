@@ -63,3 +63,35 @@ npm run test:watch                    # watch mode
 ```
 
 `npm start` runs the engine against the database from `db:up`, with a placeholder platform client that logs each send. Events enter through `ingestEvent`, which `npm run seed` calls in place of the platform's webhooks; the webhook endpoint is out of scope (see ARCHITECTURE.md, open items). The tests and the demo drive the dispatcher, worker, and scheduler directly with a fake clock. The demo uses its own `demo` schema, recreated on each run.
+
+## AI usage
+
+I built this with Claude Code (Claude Opus) as the main implementer, and used OpenAI Codex as an independent reviewer. Claude generated most of the code and much of the prose in `ARCHITECTURE.md`. The decisions, the scope and the verification process were mine.
+
+**What I decided**
+
+- The initial spec Claude worked from, and every design question where the brief was open. For example:
+  - one active run per contact, enforced in the database, with later triggers recorded as `skipped`
+  - leased workers instead of row locks held across platform calls
+  - after too many invalid replies, the run ends as `completed` with a `gave_up` outcome, not as `failed`
+- The architecture: functional core / imperative shell. I compared it with full DDD and with plain transaction scripts, and chose it so business rules stay unit-testable and no SQL lives in orchestration code.
+- Tuning and scope:
+  - the retry policy: 10 attempts, 2 s base, 5 min cap. I corrected Claude's first proposal, whose numbers never actually reached the cap.
+  - dead-lettering after 5 failures
+  - dropping a per-account rate limiter I had originally specified
+  - keeping the webhook endpoint out of scope
+- How to resolve each review finding. For example:
+  - reconcile a private reply the platform reports as "already used", instead of failing the run
+  - accept a valid answer that arrives at the moment the conversation gives up
+
+**How I worked with the AI**
+
+- Small chunks. I reviewed and approved every chunk myself; Claude never committed without me reviewing the diff and the design rationale.
+- Claude had to ask before any significant design choice.
+- Unprimed adversarial reviews after major chunks: a fresh reviewer got only the diff and the brief, with none of our rationale. Three rounds of this, plus a Codex review, found real bugs, including two that Claude introduced while fixing earlier findings.
+- Failure-mode tests on top of design-derived tests: crashed workers, timed-out sends that may still have been delivered, duplicate and late events, concurrent dispatchers.
+- Mutation checks: break the guard a test protects and confirm the test fails. This exposed two tests that could never fail, and both were rewritten.
+
+**What Claude generated**
+
+Nearly all of the TypeScript and SQL, the tests, and first drafts of the design doc, which I then reviewed and edited.
